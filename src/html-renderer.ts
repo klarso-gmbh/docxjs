@@ -415,6 +415,11 @@ export class HtmlRenderer {
 				else if (part.rootElement.type === DomType.Footer) {
 					el.style.marginBottom = `calc(${props.pageMargins.footer} - ${props.pageMargins.bottom})`;
 					el.style.minHeight = `calc(${props.pageMargins.bottom} - ${props.pageMargins.footer})`;
+					// footers grow upward from the footer line: anchor the
+					// content at the bottom of the reserved band, like Word
+					el.style.display = "flex";
+					el.style.flexDirection = "column";
+					el.style.justifyContent = "flex-end";
 				}
 			}
 
