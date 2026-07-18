@@ -167,7 +167,7 @@ export class WordDocument {
 
 	async loadFont(id: string, key: string): Promise<string> {
 		const x = await this.loadResource(this.fontTablePart, id, "uint8array");
-		return x ? this.blobToURL(new Blob([deobfuscate(x, key)])) : x;
+		return x ? this.blobToURL(new Blob([deobfuscate(x, key) as BlobPart])) : x;
 	}
 
 	async loadAltChunk(id: string, part?: Part): Promise<string> {
