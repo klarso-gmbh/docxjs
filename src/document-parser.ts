@@ -603,7 +603,33 @@ export class DocumentParser {
 			}
 		}
 
+		this.adjustParagraphAnchoredDrawings(result);
+
 		return result;
+	}
+
+	// Word measures positionV relativeFrom="paragraph" from the paragraph's
+	// margin box (i.e. including its space-before), while the zero-size anchor
+	// wrapper we emit sits at the paragraph's content top - below the margin.
+	// Compensate by subtracting the paragraph's top margin from the offset.
+	adjustParagraphAnchoredDrawings(paragraph: WmlParagraph) {
+		var marginTop = paragraph.cssStyle?.["margin-top"];
+
+		if (!marginTop)
+			return;
+
+		for (var run of paragraph.children) {
+			if (run.type !== DomType.Run || !run.children)
+				continue;
+
+			for (var child of run.children) {
+				if (child.type === DomType.Drawing
+					&& child.cssStyle?.["--docx-anchor-rel-v"] === "paragraph"
+					&& child.cssStyle["top"]) {
+					child.cssStyle["top"] = `calc(${child.cssStyle["top"]} - ${marginTop})`;
+				}
+			}
+		}
 	}
 
 	parseParagraphProperties(elem: Element, paragraph: WmlParagraph) {
@@ -1012,6 +1038,7 @@ export class DocumentParser {
 			result.cssStyle['position'] = 'relative';
 			result.cssStyle["width"] = "0px";
 			result.cssStyle["height"] = "0px";
+			result.cssStyle["--docx-anchor-rel-v"] = posY.relative;
 
 			if (posX.offset)
 				result.cssStyle["left"] = posX.offset;
@@ -1049,6 +1076,9 @@ export class DocumentParser {
 		var xfrm = xml.element(spPr, "xfrm");
 
 		result.cssStyle["position"] = "relative";
+		// baseline alignment adds the strut's descent below the image; Word
+		// sizes an image-only line to exactly the image height
+		result.cssStyle["vertical-align"] = "bottom";
 
 		for (var n of xml.elements(xfrm)) {
 			switch (n.localName) {
