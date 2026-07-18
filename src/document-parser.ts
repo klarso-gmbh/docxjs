@@ -570,7 +570,7 @@ export class DocumentParser {
 					break;
 
 				case "framePr":
-					this.parseFrame(c, paragraph);
+					this.parseFrame(c, paragraph.cssStyle);
 					break;
 
 				case "rPr":
@@ -585,11 +585,44 @@ export class DocumentParser {
 		});
 	}
 
-	parseFrame(node: Element, paragraph: WmlParagraph) {
+	parseFrame(node: Element, style: Record<string, string>) {
 		var dropCap = xml.attr(node, "dropCap");
 
-		if (dropCap == "drop")
-			paragraph.cssStyle["float"] = "left";
+		if (dropCap == "drop") {
+			style["float"] = "left";
+			return;
+		}
+
+		var width = xml.lengthAttr(node, "w");
+		var xAlign = xml.attr(node, "xAlign");
+		var hAnchor = xml.attr(node, "hAnchor");
+		var vAnchor = xml.attr(node, "vAnchor") ?? "text";
+		var x = xml.lengthAttr(node, "x");
+
+		if (width)
+			style["width"] = width;
+
+		// Text frames anchored at their own text position (vAnchor="text",
+		// e.g. margin labels): absolute positioning WITHOUT a top offset keeps
+		// the box at its static y - the same place Word anchors it - while the
+		// following content flows as if the frame occupied no column space.
+		// xAlign inside/outside is approximated as left/right (no mirrored
+		// page support).
+		if (vAnchor == "text" && (hAnchor == "page" || hAnchor == "margin")) {
+			if (xAlign == "right" || xAlign == "outside") {
+				style["position"] = "absolute";
+				style["right"] = "0";
+			} else if (xAlign == "left" || xAlign == "inside") {
+				style["position"] = "absolute";
+				style["left"] = "0";
+			} else if (x) {
+				style["position"] = "absolute";
+				style["left"] = x;
+			}
+		} else if (width) {
+			// other frame shapes: at least reserve the frame box in flow
+			style["float"] = (xAlign == "right" || xAlign == "outside") ? "right" : "left";
+		}
 	}
 
 	parseHyperlink(node: Element, parent?: OpenXmlElement): WmlHyperlink {
@@ -1261,6 +1294,11 @@ export class DocumentParser {
 				case "ind":
 				case "tblInd":
 					this.parseIndentation(c, style);
+					break;
+
+				case "framePr":
+					// also reachable from style definitions (styles.xml pPr)
+					this.parseFrame(c, style);
 					break;
 
 				case "rFonts":
