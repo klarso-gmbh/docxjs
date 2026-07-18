@@ -671,11 +671,33 @@ section.${c}>footer { z-index: 1; }
 				// reset all level counters with start value
 				resetCounters.push(counterReset);
 
-				styleText += this.styleToString(`${selector}:before`, {
+				// the number's run style: the level's own rPr wins, but fall
+				// back to the linked paragraph style's run properties so the
+				// number matches the heading's weight/font (Word behavior -
+				// otherwise the ::before only inherits the paragraph element,
+				// which carries no run formatting)
+				var numRunStyle = num.rStyle;
+				var linkedStyle = this.findStyle(num.pStyleName);
+				var linkedRun = linkedStyle?.styles?.find(s => s.target == "span")?.values;
+				if (linkedRun)
+					numRunStyle = { ...linkedRun, ...num.rStyle };
+
+				var beforeValues: Record<string, string> = {
 					"content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
 					"counter-increment": counter,
-					...num.rStyle,
-				});
+					...numRunStyle,
+				};
+
+				// a "tab" suffix should advance to a tab stop, but a CSS tab
+				// character in generated content collapses to a thin space.
+				// Emulate it: make the marker an inline-block at least one
+				// default-tab-stop wide, so the text starts at the tab stop.
+				if (num.suff == null || num.suff == "tab") {
+					beforeValues["display"] = "inline-block";
+					beforeValues["min-width"] = this.document.settingsPart?.settings?.defaultTabStop ?? "36pt";
+				}
+
+				styleText += this.styleToString(`${selector}:before`, beforeValues);
 			}
 			else {
 				listStyleType = this.numFormatToCssValue(num.format);
