@@ -690,11 +690,21 @@ section.${c}>footer { z-index: 1; }
 
 				// a "tab" suffix should advance to a tab stop, but a CSS tab
 				// character in generated content collapses to a thin space.
-				// Emulate it: make the marker an inline-block at least one
-				// default-tab-stop wide, so the text starts at the tab stop.
+				// Emulate it: make the marker an inline-block up to the tab stop,
+				// so the text starts there. With a hanging indent Word's implicit
+				// tab stop sits at the paragraph's left indent - the marker box
+				// spans exactly the hanging width (= negative text-indent);
+				// otherwise fall back to one default tab stop.
 				if (num.suff == null || num.suff == "tab") {
+					var hangingIndent = num.pStyle?.["text-indent"];
 					beforeValues["display"] = "inline-block";
-					beforeValues["min-width"] = this.document.settingsPart?.settings?.defaultTabStop ?? "36pt";
+					beforeValues["min-width"] = hangingIndent?.startsWith("-")
+						? hangingIndent.substring(1)
+						: (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
+					// baseline-aligned inline-blocks inflate the line box by
+					// their descent; top keeps the marker's internal baseline
+					// on the text baseline (same font/line-height) without that
+					beforeValues["vertical-align"] = "top";
 				}
 
 				styleText += this.styleToString(`${selector}:before`, beforeValues);
