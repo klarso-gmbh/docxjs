@@ -1173,7 +1173,7 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderRun(elem: WmlRun) {
-		if (elem.fieldRun)
+		if (elem.fieldRun || elem.fieldCodeContent)
 			return null;
 
 		const result = this.createElement("span");

@@ -94,6 +94,7 @@ export class DocumentParser {
 			item.initials = xml.attr(el, "initials");
 			item.date = xml.attr(el, "date");
 			item.children = this.parseBodyElements(el);
+			this.processFieldSegments(item.children);
 			result.push(item);
 		}
 
@@ -104,13 +105,63 @@ export class DocumentParser {
 		var xbody = xml.element(xmlDoc, "body");
 		var background = xml.element(xmlDoc, "background");
 		var sectPr = xml.element(xbody, "sectPr");
+		var children = this.parseBodyElements(xbody);
+
+		this.processFieldSegments(children);
 
 		return {
 			type: DomType.Document,
-			children: this.parseBodyElements(xbody),
+			children,
 			props: sectPr ? parseSectionProperties(sectPr, xml) : {} as SectionProperties,
 			cssStyle: background ? this.parseBackground(background) : {},
 		};
+	}
+
+	// Word displays only a complex field's result segment (separate..end); everything
+	// between begin and separate is field code. Mark content runs inside any code
+	// segment so the renderer can skip them like Word does. Must run once per story
+	// (body, each header/footer, each note) since fields may span paragraphs.
+	processFieldSegments(children: OpenXmlElement[]) {
+		var codeDepth = 0;
+		var stack: boolean[] = []; // per open field: still in code segment?
+
+		const walk = (elems: OpenXmlElement[]) => {
+			for (let el of elems) {
+				if (el.type === DomType.Run) {
+					let run = el as WmlRun;
+
+					if (run.fieldRun) {
+						for (let c of run.children ?? []) {
+							if (c.type !== DomType.ComplexField)
+								continue;
+
+							switch ((c as WmlFieldChar).charType) {
+								case "begin":
+									stack.push(true);
+									codeDepth++;
+									break;
+								case "separate":
+									if (stack.length && stack[stack.length - 1]) {
+										stack[stack.length - 1] = false;
+										codeDepth--;
+									}
+									break;
+								case "end":
+									if (stack.length && stack.pop())
+										codeDepth--;
+									break;
+							}
+						}
+					} else if (codeDepth > 0) {
+						run.fieldCodeContent = true;
+					}
+				} else if (el.children?.length) {
+					walk(el.children);
+				}
+			}
+		};
+
+		walk(children);
 	}
 
 	parseBackground(elem: Element): any {
