@@ -620,9 +620,12 @@ export class DocumentParser {
 				style["left"] = x;
 			}
 			// inside/outside depends on page parity under mirrored margins -
-			// expose it so paginating consumers can flip the frame per page
+			// expose it (plus the distance from text) so paginating consumers
+			// can place the frame per page
 			if (xAlign == "outside" || xAlign == "inside") {
 				style["--docx-frame-x"] = xAlign;
+				var hSpace = xml.lengthAttr(node, "hSpace");
+				if (hSpace) style["--docx-frame-hspace"] = hSpace;
 			}
 		} else if (width) {
 			// other frame shapes: at least reserve the frame box in flow
