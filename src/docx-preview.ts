@@ -22,6 +22,7 @@ export interface Options {
 	renderChanges: boolean;
     renderComments: boolean;
     renderAltChunks: boolean;
+    renderHeaderFooterVariants: boolean;
 }
 
 export const defaultOptions: Options = {
@@ -42,6 +43,7 @@ export const defaultOptions: Options = {
 	renderEndnotes: true,
 	useBase64URL: false,
 	renderChanges: false,
+    renderHeaderFooterVariants: false,
     renderComments: false,
     renderAltChunks: true
 }
