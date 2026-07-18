@@ -1297,9 +1297,19 @@ export class DocumentParser {
 					break;
 
 				case "ind":
-				case "tblInd":
 					this.parseIndentation(c, style);
 					break;
+
+				case "tblInd": {
+					// table indent carries its value in w:w (+ w:type), not
+					// the w:ind attribute set (negative values hang the table
+					// into the page margin)
+					if (xml.attr(c, "type") != "pct") {
+						const tblIndent = xml.lengthAttr(c, "w");
+						if (tblIndent) style["margin-left"] = tblIndent;
+					}
+					break;
+				}
 
 				case "framePr":
 					// also reachable from style definitions (styles.xml pPr)
