@@ -763,7 +763,8 @@ export class HtmlRenderer {
 .${c} { color: black; hyphens: auto; text-underline-position: from-font; text-rendering: geometricPrecision; }
 section.${c} { box-sizing: border-box; display: flex; flex-flow: column nowrap; position: relative; overflow: hidden; }
 section.${c}>article { margin-bottom: auto; z-index: 1; }
-section.${c}>footer { z-index: 1; }
+section.${c}>header { z-index: 0; }
+section.${c}>footer { z-index: 0; }
 .${c} table { border-collapse: collapse; }
 .${c} table td, .${c} table th { vertical-align: top; }
 .${c} p { margin: 0pt; min-height: 1em; }
