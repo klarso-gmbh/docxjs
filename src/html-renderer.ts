@@ -370,19 +370,40 @@ export class HtmlRenderer {
 	renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement) {
 		if (!refs) return;
 
+		// even/odd headers only apply when the document opts in (Word behavior)
+		const evenAndOdd = this.document.settingsPart?.settings?.evenAndOddHeaders ?? false;
+
 		var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-			?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+			?? (evenAndOdd && page % 2 == 1 ? refs.find(x => x.type == "even") : null)
 			?? refs.find(x => x.type == "default");
 
-		var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart) as BaseHeaderFooterPart;
+		// with renderHeaderFooterVariants every variant a later page of this
+		// section could need is rendered, tagged with data-hf-type and hidden
+		// unless selected - consumers that re-paginate by height (cloning
+		// sections into more pages) can then re-select per page
+		var variants = this.options.renderHeaderFooterVariants
+			? refs.filter((x, i) => (x.type == "default" || x.type == null
+					|| (x.type == "first" && props.titlePage)
+					|| (x.type == "even" && evenAndOdd))
+				&& refs.findIndex(y => y.type == x.type) == i)
+			: (ref ? [ref] : []);
 
-		if (part) {
+		for (const variant of variants) {
+			const part = this.document.findPartByRelId(variant.id, this.document.documentPart) as BaseHeaderFooterPart;
+
+			if (!part) continue;
+
 			this.currentPart = part;
 			if (!this.usedHederFooterParts.includes(part.path)) {
 				this.processElement(part.rootElement);
 				this.usedHederFooterParts.push(part.path);
 			}
 			const [el] = this.renderElements([part.rootElement], into) as HTMLElement[];
+
+			if (this.options.renderHeaderFooterVariants) {
+				el.setAttribute("data-hf-type", variant.type ?? "default");
+				if (variant !== ref) el.style.display = "none";
+			}
 
 			if (props?.pageMargins) {
 				if (part.rootElement.type === DomType.Header) {
@@ -394,9 +415,9 @@ export class HtmlRenderer {
 					el.style.minHeight = `calc(${props.pageMargins.bottom} - ${props.pageMargins.footer})`;
 				}
 			}
-
-			this.currentPart = null;
 		}
+
+		this.currentPart = null;
 	}
 
 	isPageBreakElement(elem: OpenXmlElement): boolean {
