@@ -1076,6 +1076,17 @@ export class DocumentParser {
 				result.cssStyle["left"] = posX.offset;
 			if (posY.offset)
 				result.cssStyle["top"] = posY.offset;
+
+			// wrapNone = the drawing floats free of the text. Take its content
+			// out of flow (absolute within this zero-size relative anchor) so it
+			// cannot inflate the enclosing paragraph's height - an in-flow child
+			// overflowing the zero-height box still contributes its height to the
+			// paragraph, which for a page-sized watermark collapses the usable
+			// page. Absolute also anchors the drawing by its top edge at the
+			// anchor offset (matching Word), instead of baseline-aligning its
+			// bottom there, and is not clipped by the anchor's zero box.
+			for (const child of result.children)
+				(child.cssStyle ??= {})["position"] = "absolute";
 		}
 		else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
 			result.cssStyle["float"] = posX.align;
