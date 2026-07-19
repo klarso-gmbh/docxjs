@@ -1303,6 +1303,15 @@ section.${c}>footer { z-index: 0; }
 		result.style.position = "relative";
 		result.style.textIndent = "0px";
 
+		// Expose the anchor's horizontal reference frame as an attribute (CSS
+		// custom properties are dropped when cssStyle is applied to the element)
+		// so a post-attach pass can shift page-relative drawings - e.g. a page
+		// watermark anchored in the footer - to the page edge once the section's
+		// final (mirror-swapped) margins are known.
+		const relH = elem.cssStyle?.["--docx-anchor-rel-h"];
+		if (relH)
+			result.setAttribute("data-docx-anchor-h", relH);
+
 		return result;
 	}
 

@@ -876,5 +876,22 @@ export function positionAnchoredFrames(container: HTMLElement, settings: WmlSett
 			ps[j].style.left = toLeft ? (inset + "px") : "auto";
 			ps[j].style.right = toLeft ? "auto" : (inset + "px");
 		}
+
+		// Page-relative anchored drawings (positionH relativeFrom="page", e.g. a
+		// page watermark anchored in the footer) must sit at their offset from
+		// the PAGE edge, but are laid out at the inline text position - inset by
+		// the margin, and not necessarily at the paragraph start. Correct each by
+		// its measured page-x so the final left edge equals the offset. Measuring
+		// (rather than subtracting the left padding) is robust to mirrored even
+		// pages, where the anchor's static position is not the left margin.
+		const sectLeft = sheets[i].getBoundingClientRect().left;
+		const draws = sheets[i].querySelectorAll<HTMLElement>('[data-docx-anchor-h="page"]');
+		for (let k = 0; k < draws.length; k++) {
+			const d = draws[k];
+			const off = parseFloat(getComputedStyle(d).left) || 0;   // offset from the page edge
+			const pageX = d.getBoundingClientRect().left - sectLeft;  // current left edge vs page (= static + off)
+			d.style.left = (2 * off - pageX) + "px";                  // => final left edge === off
+			d.removeAttribute("data-docx-anchor-h"); // idempotent: don't correct twice
+		}
 	}
 }

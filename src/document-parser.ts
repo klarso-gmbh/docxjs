@@ -1071,6 +1071,7 @@ export class DocumentParser {
 			result.cssStyle["width"] = "0px";
 			result.cssStyle["height"] = "0px";
 			result.cssStyle["--docx-anchor-rel-v"] = posY.relative;
+			result.cssStyle["--docx-anchor-rel-h"] = posX.relative;
 
 			if (posX.offset)
 				result.cssStyle["left"] = posX.offset;
