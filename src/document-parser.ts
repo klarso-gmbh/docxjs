@@ -1441,6 +1441,7 @@ export class DocumentParser {
 
 				case "pBdr":
 					this.parseBorderProperties(c, style);
+					this.applyParagraphBorderSpacing(c, style);
 					break;
 
 				case "bdr":
@@ -1668,6 +1669,32 @@ export class DocumentParser {
 				// min-height doesn't work for tr
 				//output["min-height"] = xml.sizeAttr(node, "val");  
 				break;
+		}
+	}
+
+	// Word draws paragraph borders w:space points away from the text WITHOUT
+	// moving the text (change bars stand off in the margin): pull the border
+	// outward with a negative margin and pad the text back to its column
+	// position. Left/right only - the change-bar case; top/bottom borders
+	// keep plain flow behavior. Limitation: the inline margin overrides a
+	// numbering class margin (no known document combines both with an indent).
+	applyParagraphBorderSpacing(node: Element, style: Record<string, string>) {
+		for (var side of ["left", "right"]) {
+			var el = xml.element(node, side) ?? xml.element(node, side == "left" ? "start" : "end");
+
+			if (!el)
+				continue;
+
+			var space = xml.lengthAttr(el, "space", LengthUsage.Point);
+
+			if (!space)
+				continue;
+
+			var sz = xml.lengthAttr(el, "sz", LengthUsage.Border);
+			var offset = parseFloat(space) + (sz ? parseFloat(sz) : 0);
+
+			style[`margin-${side}`] = `-${offset.toFixed(2)}pt`;
+			style[`padding-${side}`] = space;
 		}
 	}
 
