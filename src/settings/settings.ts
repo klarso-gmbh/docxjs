@@ -8,6 +8,8 @@ export interface WmlSettings {
 	endnoteProps: NoteProperties;
 	autoHyphenation: boolean;
 	evenAndOddHeaders: boolean;
+	mirrorMargins: boolean;
+	compatibilityMode: number;
 }
 
 export interface NoteProperties {
@@ -25,10 +27,21 @@ export function parseSettings(elem: Element, xml: XmlParser) {
 			case "endnotePr": result.endnoteProps = parseNoteProperties(el, xml); break;
 			case "autoHyphenation": result.autoHyphenation = xml.boolAttr(el, "val"); break;
 			case "evenAndOddHeaders": result.evenAndOddHeaders = xml.boolAttr(el, "val", true); break;
+			case "mirrorMargins": result.mirrorMargins = xml.boolAttr(el, "val", true); break;
+			case "compat": result.compatibilityMode = parseCompatibilityMode(el, xml); break;
 		}
 	}
 
     return result;
+}
+
+export function parseCompatibilityMode(elem: Element, xml: XmlParser): number {
+	for (let el of xml.elements(elem, "compatSetting")) {
+		if (xml.attr(el, "name") == "compatibilityMode")
+			return xml.intAttr(el, "val");
+	}
+
+	return null;
 }
 
 export function parseNoteProperties(elem: Element, xml: XmlParser) {

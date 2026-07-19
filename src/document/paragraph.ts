@@ -19,6 +19,7 @@ export interface ParagraphProperties extends CommonProperties {
     lineSpacing: LineSpacing;
     keepLines: boolean;
     keepNext: boolean;
+    widowControl: boolean;
     pageBreakBefore: boolean;
     outlineLevel: number;
 	styleName?: string;
@@ -84,7 +85,11 @@ export function parseParagraphProperty(elem: Element, props: ParagraphProperties
         case "keepNext":
             props.keepNext = xml.boolAttr(elem, "val", true);
             break;
-        
+
+        case "widowControl":
+            props.widowControl = xml.boolAttr(elem, "val", true);
+            break;
+
         case "pageBreakBefore":
             props.pageBreakBefore = xml.boolAttr(elem, "val", true);
             break;
