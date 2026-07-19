@@ -701,7 +701,9 @@ section.${c}>footer { z-index: 1; }
 				if (num.suff == null || num.suff == "tab") {
 					var hangingIndent = num.pStyle?.["text-indent"];
 					beforeValues["display"] = "inline-block";
-					beforeValues["min-width"] = hangingIndent?.startsWith("-")
+					// levels declaring hanging="0" parse to "-0.00pt" - only a
+					// real (negative) hanging indent replaces the default stop
+					beforeValues["min-width"] = (hangingIndent && parseFloat(hangingIndent) < 0)
 						? hangingIndent.substring(1)
 						: (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
 					// baseline-aligned inline-blocks inflate the line box by
