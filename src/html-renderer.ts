@@ -1152,7 +1152,7 @@ section.${c}>footer { z-index: 1; }
 	}
 
 	renderRun(elem: WmlRun) {
-		if (elem.fieldRun)
+		if (elem.fieldRun || elem.fieldCodeContent)
 			return null;
 
 		let children = this.renderElements(elem.children);

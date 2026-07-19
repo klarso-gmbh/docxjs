@@ -5,7 +5,8 @@ import { OpenXmlElement } from "./dom";
 export interface WmlRun extends OpenXmlElement, RunProperties {
     id?: string;
     verticalAlign?: string;
-	fieldRun?: boolean;  
+	fieldRun?: boolean;
+	fieldCodeContent?: boolean;
 }
 
 export interface RunProperties extends CommonProperties {
