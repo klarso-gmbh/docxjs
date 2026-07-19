@@ -1,6 +1,7 @@
 import { WordDocument } from './word-document';
 import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
+import { positionAnchoredFrames } from './measured-pagination';
 import { h } from './html';
 
 export interface Options {
@@ -24,6 +25,24 @@ export interface Options {
     renderComments: boolean;
     renderAltChunks: boolean;
     renderHeaderFooterVariants: boolean;
+    // When true, the renderer measures the laid-out document, inserts
+    // lastRenderedPageBreak markers into the model where the content overflows
+    // a page, and re-renders so pages split at Word-faithful boundaries. Also
+    // applies Word's "auto" line metrics, justified space shrinking and (with
+    // `hyphenate`) automatic hyphenation. Off by default: the render is then
+    // byte-identical to stock docx-preview.
+    measuredPagination: boolean;
+    // Batch hyphenation callback used only under measuredPagination when the
+    // document opts into automatic hyphenation. Receives the unique body words
+    // (length >= 5) and must return each word with U+00AD soft hyphens inserted
+    // at its permissible break points (or the word unchanged), in the same
+    // order. May return synchronously or as a Promise. docx-preview inserts the
+    // soft hyphens into the model before measuring so both render passes agree.
+    hyphenate: (words: string[]) => string[] | Promise<string[]>;
+    // Under measuredPagination, the fraction by which justified inter-word
+    // spaces may shrink to pull a word onto a line (Word 2013+ behavior).
+    // Given as a positive fraction (e.g. 0.4 = up to 40%); defaults to 0.4.
+    justificationShrink?: number;
     h: typeof h;
 }
 
@@ -48,6 +67,9 @@ export const defaultOptions: Options = {
     renderComments: false,
     renderAltChunks: true,
     renderHeaderFooterVariants: false,
+    measuredPagination: false,
+    hyphenate: null,
+    justificationShrink: 0.4,
     h: h
 };
 
@@ -74,6 +96,13 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
         const c = n.nodeName === "STYLE" ? styleContainer : bodyContainer;
         c.appendChild(n);
     }
-    
+
+    // Anchored (framePr) drawings that hang into the inside/outside margin need
+    // the page's final, possibly mirror-swapped padding to be positioned - which
+    // is only measurable once the pages are attached. (The even/odd padding swap
+    // itself happens during render, in createPageElement.)
+    if (userOptions?.measuredPagination)
+        positionAnchoredFrames(bodyContainer, doc.settingsPart?.settings);
+
     return doc;
 }

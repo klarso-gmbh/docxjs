@@ -24,6 +24,10 @@ import { Part } from './common/part';
 import { VmlElement } from './vml/vml';
 import { WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
+import {
+	assignModelIndices, applyMeasuredGeometry, findMeasuredBreaks, applyBreaksToModel,
+	hyphenateModel, getAutoLineMul
+} from './measured-pagination';
 
 interface CellPos {
 	col: number;
@@ -59,6 +63,13 @@ export class HtmlRenderer {
 	currentFootnoteIds: string[];
 	currentEndnoteIds: string[] = [];
 	usedHederFooterParts: any[] = [];
+
+	// measured pagination: mi -> body element map, current page ordinal for
+	// mirror margins, and rendered header/footer part roots by path (for
+	// applying measured geometry to the part model that the second pass re-uses)
+	measuredMiMap: Map<number, OpenXmlElement> = null;
+	currentPageIndex = 0;
+	hfPartsByPath: Record<string, OpenXmlElement> = {};
 
 	defaultTabSize: string;
 	currentTabs: any[] = [];
@@ -116,7 +127,9 @@ export class HtmlRenderer {
 		if (!options.ignoreFonts && document.fontTablePart)
 			result.push(...await this.renderFontTable(document.fontTablePart));
 
-		var sectionElements = this.renderSections(document.documentPart.body);
+		var sectionElements = options.measuredPagination
+			? await this.renderMeasured(document, result)
+			: this.renderSections(document.documentPart.body);
 
 		if (this.options.inWrapper) {
 			result.push(this.renderWrapper(sectionElements));
@@ -302,6 +315,16 @@ export class HtmlRenderer {
 				if (!this.options.ignoreHeight)
 					style.minHeight = props.pageSize.height;
 			}
+
+			// mirrored margins: even pages swap left/right page padding (content
+			// width is parity-constant, so this is a pure x-shift)
+			if (this.options.measuredPagination && props.pageMargins
+				&& this.document.settingsPart?.settings?.mirrorMargins
+				&& (this.currentPageIndex + 1) % 2 === 0) {
+				const l = style.paddingLeft;
+				style.paddingLeft = style.paddingRight;
+				style.paddingRight = l;
+			}
 		}
 
 		return this.h({ tagName: "section", className, style }) as HTMLElement;
@@ -329,13 +352,22 @@ export class HtmlRenderer {
 		const sections = this.splitBySection(document.children, document.props);
 		const pages = this.groupByPageBreaks(sections);
 		let prevProps = null;
+		const sectIndex = new Map<SectionProperties, number>();
 
-		for (let i = 0, l = pages.length; i < l; i++) {			
+		for (let i = 0, l = pages.length; i < l; i++) {
 			this.currentFootnoteIds = [];
 
 			const section = pages[i][0];
 			let props = section.sectProps;
+			this.currentPageIndex = result.length; // global page ordinal (mirror margins)
 			const pageElement = this.createPageElement(this.className, props, document.cssStyle);
+
+			// stamp the Word section index (pages of one section share sectProps)
+			// so a consumer's page-number stamper can count SECTIONPAGES
+			if (this.options.measuredPagination) {
+				if (!sectIndex.has(props)) sectIndex.set(props, sectIndex.size);
+				pageElement.setAttribute("data-docx-sect", String(sectIndex.get(props)));
+			}
 
 			this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props,
 				result.length, prevProps != props, pageElement);
@@ -365,6 +397,78 @@ export class HtmlRenderer {
 		}
 
 		return result;
+	}
+
+	/* Two-pass measured pagination: render once, measure where content overflows
+	   each page, insert lastRenderedPageBreak markers into the model, then render
+	   again so pages split natively - with per-page header/footer selection and
+	   mirrored margins handled by the normal render path. Word "auto" line
+	   metrics, justified space shrinking and hyphenation are applied to the model
+	   before measuring so both passes agree. */
+	async renderMeasured(wordDoc: WordDocument, styleResult: Node[]): Promise<HTMLElement[]> {
+		const body = wordDoc.documentPart.body;
+		const settings = wordDoc.settingsPart?.settings;
+
+		// measured pagination expresses breaks as lastRenderedPageBreak markers,
+		// so both passes must honor them (and pass 1 must group the doc into as few
+		// sheets as its own breaks dictate, then measure the overflow)
+		this.options.ignoreLastRenderedPageBreak = false;
+
+		// hyphenate the model text (both passes see the same soft hyphens)
+		if (this.options.hyphenate && settings?.autoHyphenation) {
+			try { await hyphenateModel(body, this.options.hyphenate); }
+			catch (e) { if (this.options.debug) console.warn("docx-preview: hyphenation failed", e); }
+		}
+
+		// index body paragraphs/tables so measured DOM maps back to the model
+		this.measuredMiMap = assignModelIndices(body);
+
+		// pass 1: render every header/footer variant so continuation sheets are
+		// measured with their real (default) header, not the tall first-page one
+		this.options.renderHeaderFooterVariants = true;
+		this.hfPartsByPath = {};
+		const pass1 = this.renderSections(body);
+		// pass 2 selects one variant per page natively (by final ordinal), so it
+		// must not keep every variant around
+		this.options.renderHeaderFooterVariants = false;
+
+		// offscreen measuring host with the document's own styles applied
+		const host = this.h({ tagName: "div", className: `${this.className}-wrapper`, children: pass1 }) as HTMLElement;
+		host.style.cssText = "position:absolute;left:-99999px;top:0;visibility:hidden";
+		const styleClones = styleResult.filter(n => n.nodeName === "STYLE").map(n => n.cloneNode(true) as Node);
+		styleClones.forEach(s => document.head.appendChild(s));
+		document.body.appendChild(host);
+
+		try {
+			// image boxes are sized from the model, but await loads to match on-screen
+			await Promise.allSettled(this.tasks);
+
+			const lineMul = getAutoLineMul(wordDoc);
+			const shrink = this.options.justificationShrink != null
+				? -Math.abs(this.options.justificationShrink) : undefined;
+			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink);
+
+			const breaks = findMeasuredBreaks(host);
+			applyBreaksToModel(breaks, this.measuredMiMap);
+		} finally {
+			host.remove();
+			styleClones.forEach(s => (s as ChildNode).remove());
+		}
+
+		// reset accumulated render state for the clean second pass
+		this.currentFootnoteIds = [];
+		this.currentEndnoteIds = [];
+		this.usedHederFooterParts = [];
+		this.tableVerticalMerges = [];
+		this.currentVerticalMerge = null;
+		this.tableCellPositions = [];
+		this.currentCellPosition = null;
+		this.tasks = [];
+		this.postRenderTasks = [];
+
+		// pass 2: render the now-marked model (native per-page header/footer + mirror)
+		this.currentPageIndex = 0;
+		return this.renderSections(body);
 	}
 
 	renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement) {
@@ -405,6 +509,13 @@ export class HtmlRenderer {
 				if (variant !== ref) el.style.display = "none";
 			}
 
+			// measured pagination applies Word line metrics to the header/footer
+			// part model too; tag the instance so geometry maps its <p> back
+			if (this.options.measuredPagination) {
+				el.setAttribute("data-docx-part", part.path);
+				this.hfPartsByPath[part.path] = part.rootElement;
+			}
+
 			if (props?.pageMargins) {
 				if (part.rootElement.type === DomType.Header) {
 					el.style.marginTop = `calc(${props.pageMargins.header} - ${props.pageMargins.top})`;
@@ -435,6 +546,11 @@ export class HtmlRenderer {
 		return (elem as WmlBreak).break == "page";
 	}
 
+	// a run whose direct children include an honored page break
+	isPageBreakRun(elem: OpenXmlElement): boolean {
+		return elem?.type == DomType.Run && (elem.children?.some(c => this.isPageBreakElement(c)) ?? false);
+	}
+
 	isPageBreakSection(prev: SectionProperties, next: SectionProperties): boolean {
 		if (!prev) return false;
 		if (!next) return false;
@@ -444,12 +560,56 @@ export class HtmlRenderer {
 			|| prev.pageSize?.height != next.pageSize?.height;
 	}
 
+	// scans a table row for an honored page break (measured pagination inserts
+	// one into a cell to split the table there)
+	rowHasPageBreak(row: OpenXmlElement): boolean {
+		const scan = (el: OpenXmlElement): boolean =>
+			this.isPageBreakElement(el) || (el.children?.some(scan) ?? false);
+		return row.children?.some(scan) ?? false;
+	}
+
+	// splits a table into row segments at cell-internal page breaks; the first
+	// segment reuses the table object, the rest are clones keeping the columns
+	// (widths). Returns [table] when there is nothing to split.
+	splitTableByRowBreaks(table: WmlTable): WmlTable[] {
+		const rows = table.children ?? [];
+		const breakRows: number[] = [];
+		for (let ri = 0; ri < rows.length; ri++)
+			if (this.rowHasPageBreak(rows[ri])) breakRows.push(ri);
+		if (!breakRows.length) return [table];
+
+		const bounds = [0, ...breakRows, rows.length];
+		const segs: WmlTable[] = [];
+		for (let bi = 0; bi < bounds.length - 1; bi++) {
+			const seg = rows.slice(bounds[bi], bounds[bi + 1]);
+			if (!seg.length) continue;
+			if (segs.length === 0) { table.children = seg; segs.push(table); }
+			else segs.push({ ...table, children: seg } as WmlTable);
+		}
+		return segs;
+	}
+
 	splitBySection(elements: OpenXmlElement[], defaultProps: SectionProperties): Section[] {
 		var current: Section = { sectProps: null, elements: [], pageBreak: false };
 		var result = [current];
 
-		for (let elem of elements) {
-			if (elem.type == DomType.Paragraph) {
+		// measured pagination may insert several markers per paragraph and split
+		// tables at cell-internal markers, so it iterates a worklist it can extend
+		const measured = this.options.measuredPagination;
+		const list = measured ? elements.slice() : elements;
+
+		for (let ei = 0; ei < list.length; ei++) {
+			let elem = list[ei];
+
+			// page break before a block (measured: whole-block moves and table
+			// continuations moved as a unit)
+			if (measured && (elem as any).$pageBreakBefore) {
+				current.pageBreak = true;
+				current = { sectProps: null, elements: [], pageBreak: false };
+				result.push(current);
+			}
+
+			if (elem.type == DomType.Paragraph && !(measured && (elem as any).$splitCont)) {
 				const s = this.findStyle((elem as WmlParagraph).styleName);
 
 				if (s?.paragraphProps?.pageBreakBefore) {
@@ -457,6 +617,22 @@ export class HtmlRenderer {
 					current.pageBreak = true;
 					current = { sectProps: null, elements: [], pageBreak: false };
 					result.push(current);
+				}
+			}
+
+			// measured: split a table at cell-internal page breaks (row boundaries)
+			if (measured && elem.type == DomType.Table && this.options.breakPages) {
+				const segs = this.splitTableByRowBreaks(elem as WmlTable);
+				if (segs.length > 1) {
+					for (let si = 0; si < segs.length; si++) {
+						current.elements.push(segs[si]);
+						if (si < segs.length - 1) {
+							current.pageBreak = true;
+							current = { sectProps: null, elements: [], pageBreak: false };
+							result.push(current);
+						}
+					}
+					continue;
 				}
 			}
 
@@ -491,13 +667,30 @@ export class HtmlRenderer {
 						var children = elem.children;
 						var newParagraph = { ...elem, children: children.slice(pBreakIndex) };
 						elem.children = children.slice(0, pBreakIndex);
-						current.elements.push(newParagraph);
 
 						if (splitRun) {
 							let runChildren = breakRun.children;
 							let newRun = { ...breakRun, children: runChildren.slice(0, rBreakIndex) };
 							elem.children.push(newRun);
 							breakRun.children = runChildren.slice(rBreakIndex);
+						}
+
+						if (measured) {
+							// a continuation must not repeat the number, and the
+							// break-before belonged to the first part only; re-inject
+							// it so any further markers in it start their own pages
+							(newParagraph as any).$splitCont = true;
+							(newParagraph as any).$pageBreakBefore = false;
+							// drop the leading standalone marker run so the same
+							// break is not re-detected (an infinite split); a run
+							// that also carried post-break content (splitRun) stays
+							if (!splitRun && newParagraph.children.length
+								&& this.isPageBreakRun(newParagraph.children[0]))
+								newParagraph.children = newParagraph.children.slice(1);
+							if (newParagraph.children.length)
+								list.splice(ei + 1, 0, newParagraph);
+						} else {
+							current.elements.push(newParagraph);
 						}
 					}
 				}
@@ -980,11 +1173,18 @@ section.${c}>footer { z-index: 1; }
 		const style = this.findStyle(elem.styleName);
 		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
 
-		const numbering = elem.numbering ?? style?.paragraphProps?.numbering;
+		// a continuation of a paragraph split at a measured page break must not
+		// repeat its number nor re-increment the numbering counter
+		const numbering = (this.options.measuredPagination && (elem as any).$splitCont)
+			? null
+			: (elem.numbering ?? style?.paragraphProps?.numbering);
 
 		if (numbering) {
 			result.classList.add(this.numberingClass(numbering.id, numbering.level));
 		}
+
+		if (this.options.measuredPagination && (elem as any).$mi != null)
+			result.setAttribute("data-docx-mi", String((elem as any).$mi));
 
 		return result;
 	}
@@ -1201,7 +1401,12 @@ section.${c}>footer { z-index: 1; }
 
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
-		return this.toHTML(elem, ns.html, "table", children);
+		const result = this.toHTML(elem, ns.html, "table", children) as HTMLElement;
+
+		if (this.options.measuredPagination && (elem as any).$mi != null)
+			result.setAttribute("data-docx-mi", String((elem as any).$mi));
+
+		return result;
 	}
 
 	renderTableColumns(columns: WmlTableColumn[]) {
