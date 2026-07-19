@@ -25,7 +25,7 @@ export function parseSettings(elem: Element, xml: XmlParser) {
 			case "defaultTabStop": result.defaultTabStop = xml.lengthAttr(el, "val"); break;
 			case "footnotePr": result.footnoteProps = parseNoteProperties(el, xml); break;
 			case "endnotePr": result.endnoteProps = parseNoteProperties(el, xml); break;
-			case "autoHyphenation": result.autoHyphenation = xml.boolAttr(el, "val"); break;
+			case "autoHyphenation": result.autoHyphenation = xml.boolAttr(el, "val", true); break;
 			case "evenAndOddHeaders": result.evenAndOddHeaders = xml.boolAttr(el, "val", true); break;
 			case "mirrorMargins": result.mirrorMargins = xml.boolAttr(el, "val", true); break;
 			case "compat": result.compatibilityMode = parseCompatibilityMode(el, xml); break;
