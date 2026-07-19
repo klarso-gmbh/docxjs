@@ -613,6 +613,11 @@ export class DocumentParser {
 				style["position"] = "absolute";
 				style["left"] = x;
 			}
+			// inside/outside depends on page parity under mirrored margins -
+			// expose it so paginating consumers can flip the frame per page
+			if (xAlign == "outside" || xAlign == "inside") {
+				style["--docx-frame-x"] = xAlign;
+			}
 		} else if (width) {
 			// other frame shapes: at least reserve the frame box in flow
 			style["float"] = (xAlign == "right" || xAlign == "outside") ? "right" : "left";
