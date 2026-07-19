@@ -714,6 +714,97 @@ function markTableRowBreak(table: OpenXmlElement, row: number) {
 }
 
 // ===========================================================================
+// 4b. Resolving breaks to document-addressable positions.
+//     For external tooling that writes the same lastRenderedPageBreak markers
+//     into a PRISTINE copy of word/document.xml (which it addresses by the
+//     document order of <w:p> elements). Must run BEFORE applyBreaksToModel
+//     mutates the paragraphs, so the recorded character offsets still line up
+//     with the paragraph text.
+// ===========================================================================
+
+/* The first paragraph reachable inside a table/row/cell in document order
+   (recursing through nested tables) - where Word places a page break for a
+   whole-block or table-row break. */
+function firstParagraphIn(el: OpenXmlElement): OpenXmlElement | null {
+	if (!el || !el.children) return null;
+	for (const c of el.children) {
+		if (c.type == DomType.Paragraph) return c;
+		if (c.type == DomType.Table || c.type == DomType.Row || c.type == DomType.Cell) {
+			const p = firstParagraphIn(c);
+			if (p) return p;
+		}
+	}
+	return null;
+}
+
+/* Soft hyphens the model text carries before `offset` (hyphenation inserts
+   U+00AD into the model, so a measured offset counts them - but the pristine
+   docx has none, so the document-addressable offset must be shy-free). */
+function shyBefore(p: WmlParagraph, offset: number): number {
+	const { atoms } = paragraphAtoms(p);
+	let shy = 0;
+	for (const a of atoms) {
+		if (a.start >= offset) break;
+		if (a.kind !== "text") continue;
+		const text = (a.leaf as WmlText).text ?? "";
+		const end = Math.min(a.len, offset - a.start);
+		for (let k = 0; k < end; k++) if (text.charCodeAt(k) === 0xAD) shy++;
+	}
+	return shy;
+}
+
+/* Resolves the measured break descriptors to positions addressed against the
+   original word/document.xml: each break becomes { paraIndex, offset } where
+   paraIndex is the target paragraph's index over ALL body paragraphs in
+   document order (depth-first, table-cell paragraphs included - matching
+   document.getElementsByTagNameNS(w,"p")) and offset is a soft-hyphen-free
+   character offset within it (0 for whole-block / table-row breaks). Entries
+   whose element cannot be resolved are skipped; negative offsets clamp to 0. */
+export function resolveBreaksToDocument(
+	breaks: BreakDesc[],
+	miMap: Map<number, OpenXmlElement>,
+	body: DocumentElement
+): { paraIndex: number; offset: number }[] {
+	// document-order paragraph index (same traversal assignModelIndices uses,
+	// collecting every paragraph instead of paragraphs+tables)
+	const indexOfPara = new Map<OpenXmlElement, number>();
+	let count = 0;
+	const walk = (el: OpenXmlElement) => {
+		if (!el.children) return;
+		for (const c of el.children) {
+			if (c.type == DomType.Paragraph) indexOfPara.set(c, count++);
+			if (c.type == DomType.Table || c.type == DomType.Row || c.type == DomType.Cell)
+				walk(c);
+		}
+	};
+	walk(body);
+
+	const out: { paraIndex: number; offset: number }[] = [];
+	for (const b of breaks) {
+		let para: OpenXmlElement | null = null;
+		let offset = 0;
+		if (b.kind === "before") {
+			const el = miMap.get(b.mi);
+			if (!el) continue;
+			para = el.type == DomType.Table ? firstParagraphIn(el) : el;
+		} else if (b.kind === "tableRow") {
+			const table = miMap.get(b.mi);
+			const row = table?.children?.[b.row];
+			para = firstParagraphIn(row);
+		} else { // paraChar
+			para = miMap.get(b.mi) ?? null;
+			if (para && para.type == DomType.Paragraph)
+				offset = Math.max(0, b.offset - shyBefore(para as WmlParagraph, b.offset));
+		}
+		if (!para) continue;
+		const paraIndex = indexOfPara.get(para);
+		if (paraIndex === undefined) continue;
+		out.push({ paraIndex, offset });
+	}
+	return out;
+}
+
+// ===========================================================================
 // 5. Hyphenation (model text), before the first render pass.
 // ===========================================================================
 

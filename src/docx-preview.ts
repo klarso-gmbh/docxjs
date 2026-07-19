@@ -39,6 +39,17 @@ export interface Options {
     // order. May return synchronously or as a Promise. docx-preview inserts the
     // soft hyphens into the model before measuring so both render passes agree.
     hyphenate: (words: string[]) => string[] | Promise<string[]>;
+    // Called during measured pagination with the break positions the library
+    // decided, addressed against the ORIGINAL document: each entry is the
+    // document-order index of the target paragraph over all body paragraphs
+    // (depth-first, including table-cell paragraphs - the order
+    // getElementsByTagNameNS(w,"p") yields) plus a soft-hyphen-free character
+    // offset within it (0 for whole-block breaks). Invoked BEFORE the model is
+    // mutated to insert the markers, so a caller can write the same
+    // lastRenderedPageBreak markers into a pristine copy of word/document.xml
+    // (e.g. to compare the measured pagination against a real renderer). Only
+    // called under measuredPagination.
+    onMeasuredBreaks?: (breaks: { paraIndex: number; offset: number }[]) => void;
     // Under measuredPagination, the fraction by which justified inter-word
     // spaces may shrink to pull a word onto a line (Word 2013+ behavior).
     // Given as a positive fraction (e.g. 0.4 = up to 40%); defaults to 0.4.
@@ -69,6 +80,7 @@ export const defaultOptions: Options = {
     renderHeaderFooterVariants: false,
     measuredPagination: false,
     hyphenate: null,
+    onMeasuredBreaks: null,
     justificationShrink: 0.4,
     h: h
 };

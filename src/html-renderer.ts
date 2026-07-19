@@ -26,7 +26,7 @@ import { WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
 import {
 	assignModelIndices, applyMeasuredGeometry, findMeasuredBreaks, applyBreaksToModel,
-	hyphenateModel, getAutoLineMul
+	resolveBreaksToDocument, hyphenateModel, getAutoLineMul
 } from './measured-pagination';
 
 interface CellPos {
@@ -449,6 +449,15 @@ export class HtmlRenderer {
 			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink);
 
 			const breaks = findMeasuredBreaks(host);
+			// expose the breaks addressed against the original document BEFORE
+			// applyBreaksToModel mutates the paragraphs (offsets still line up)
+			if (this.options.onMeasuredBreaks) {
+				try {
+					this.options.onMeasuredBreaks(resolveBreaksToDocument(breaks, this.measuredMiMap, body));
+				} catch (e) {
+					if (this.options.debug) console.warn("docx-preview: onMeasuredBreaks callback failed", e);
+				}
+			}
 			applyBreaksToModel(breaks, this.measuredMiMap);
 		} finally {
 			host.remove();
