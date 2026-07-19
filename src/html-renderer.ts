@@ -593,10 +593,12 @@ export class HtmlRenderer {
 		var current: Section = { sectProps: null, elements: [], pageBreak: false };
 		var result = [current];
 
-		// measured pagination may insert several markers per paragraph and split
-		// tables at cell-internal markers, so it iterates a worklist it can extend
+		// a paragraph may carry several page breaks (measured pagination inserts
+		// them; a Word/marked document can too - a figure whose images span
+		// pages, or a break-before plus an internal break). Iterate a worklist so
+		// a split continuation can be re-scanned for its own further breaks.
 		const measured = this.options.measuredPagination;
-		const list = measured ? elements.slice() : elements;
+		const list = elements.slice();
 
 		for (let ei = 0; ei < list.length; ei++) {
 			let elem = list[ei];
@@ -609,7 +611,7 @@ export class HtmlRenderer {
 				result.push(current);
 			}
 
-			if (elem.type == DomType.Paragraph && !(measured && (elem as any).$splitCont)) {
+			if (elem.type == DomType.Paragraph && !(elem as any).$splitCont) {
 				const s = this.findStyle((elem as WmlParagraph).styleName);
 
 				if (s?.paragraphProps?.pageBreakBefore) {
@@ -675,23 +677,29 @@ export class HtmlRenderer {
 							breakRun.children = runChildren.slice(rBreakIndex);
 						}
 
-						if (measured) {
-							// a continuation must not repeat the number, and the
-							// break-before belonged to the first part only; re-inject
-							// it so any further markers in it start their own pages
-							(newParagraph as any).$splitCont = true;
-							(newParagraph as any).$pageBreakBefore = false;
-							// drop the leading standalone marker run so the same
-							// break is not re-detected (an infinite split); a run
-							// that also carried post-break content (splitRun) stays
-							if (!splitRun && newParagraph.children.length
-								&& this.isPageBreakRun(newParagraph.children[0]))
+						// re-inject the continuation so it is re-scanned for its own
+						// further breaks (a continuation must not repeat the number,
+						// and a break-before belonged to the first part only). This
+						// is what lets a paragraph split at MORE THAN ONE marker -
+						// needed both under measured pagination and when re-rendering
+						// a marked document with measuredPagination off.
+						(newParagraph as any).$splitCont = true;
+						(newParagraph as any).$pageBreakBefore = false;
+						// drop the leading page-break marker so the same break is not
+						// re-detected (an infinite split): a standalone marker run is
+						// removed whole; a run that also carried post-break content
+						// keeps the content but loses the marker element.
+						const lead = newParagraph.children[0];
+						if (lead && this.isPageBreakRun(lead)) {
+							if ((lead.children?.length ?? 0) <= 1) {
 								newParagraph.children = newParagraph.children.slice(1);
-							if (newParagraph.children.length)
-								list.splice(ei + 1, 0, newParagraph);
-						} else {
-							current.elements.push(newParagraph);
+							} else {
+								const bi = lead.children.findIndex(this.isPageBreakElement.bind(this));
+								if (bi >= 0) lead.children = lead.children.filter((c, k) => k !== bi);
+							}
 						}
+						if (newParagraph.children.length)
+							list.splice(ei + 1, 0, newParagraph);
 					}
 				}
 			}
