@@ -15,6 +15,7 @@ import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
 import { FooterHeaderReference, SectionProperties } from './document/section';
 import { WmlRun } from './document/run';
+import { WmlFieldSimple } from './document/fields';
 import { WmlBookmarkStart } from './document/bookmarks';
 import { IDomStyle } from './document/style';
 import { WmlBaseNote, WmlFootnote } from './notes/elements';
@@ -477,7 +478,9 @@ export class HtmlRenderer {
 
 		// pass 2: render the now-marked model (native per-page header/footer + mirror)
 		this.currentPageIndex = 0;
-		return this.renderSections(body);
+		const pages = this.renderSections(body);
+		this.fillPageFields(pages);
+		return pages;
 	}
 
 	renderHeaderFooter(refs: FooterHeaderReference[], props: SectionProperties, page: number, firstOfSection: boolean, into: HTMLElement) {
@@ -1012,6 +1015,9 @@ section.${c}>footer { z-index: 1; }
 			case DomType.Run:
 				return this.renderRun(elem as WmlRun);
 
+			case DomType.SimpleField:
+				return this.renderSimpleField(elem as WmlFieldSimple);
+
 			case DomType.Table:
 				return this.renderTable(elem);
 
@@ -1400,7 +1406,46 @@ section.${c}>footer { z-index: 1; }
 		if (elem.id)
 			result.id = elem.id;
 
+		// mark PAGE/NUMPAGES/SECTIONPAGES result runs so measured pagination can
+		// fill the live per-page value (see fillPageFields)
+		if (elem.fieldValue && this.options.measuredPagination)
+			result.setAttribute("data-docx-field", elem.fieldValue);
+
 		return result;
+	}
+
+	// A simple field (w:fldSimple). Only PAGE/NUMPAGES/SECTIONPAGES fields are
+	// rendered, and only under measuredPagination (where the live value can be
+	// computed) - matching the default renderer, which does not render simple
+	// fields at all. The cached result is rendered as a placeholder and then
+	// overwritten per page by fillPageFields.
+	renderSimpleField(elem: WmlFieldSimple) {
+		if (!elem.fieldValue || !this.options.measuredPagination)
+			return null;
+
+		const result = this.toHTML(elem, ns.html, "span", this.renderElements(elem.children));
+		result.setAttribute("data-docx-field", elem.fieldValue);
+		return result;
+	}
+
+	// Fills PAGE/NUMPAGES/SECTIONPAGES field placeholders with live values now
+	// that the final pages are known. SECTIONPAGES counts pages sharing a
+	// section (data-docx-sect, stamped per page in measured mode).
+	fillPageFields(pages: HTMLElement[]) {
+		const sectKey = (s: HTMLElement, i: number) => s.getAttribute("data-docx-sect") ?? ("solo" + i);
+		const perSect: Record<string, number> = {};
+		pages.forEach((s, i) => { const k = sectKey(s, i); perSect[k] = (perSect[k] ?? 0) + 1; });
+		pages.forEach((s, i) => {
+			const vals: Record<string, string> = {
+				PAGE: String(i + 1),
+				NUMPAGES: String(pages.length),
+				SECTIONPAGES: String(perSect[sectKey(s, i)])
+			};
+			s.querySelectorAll<HTMLElement>("[data-docx-field]").forEach(el => {
+				const v = vals[el.getAttribute("data-docx-field")];
+				if (v != null) el.textContent = v;
+			});
+		});
 	}
 
 	renderTable(elem: WmlTable) {

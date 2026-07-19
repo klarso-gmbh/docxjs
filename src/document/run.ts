@@ -7,6 +7,10 @@ export interface WmlRun extends OpenXmlElement, RunProperties {
     verticalAlign?: string;
 	fieldRun?: boolean;
 	fieldCodeContent?: boolean;
+	// set on the result run of a PAGE/NUMPAGES/SECTIONPAGES field so the
+	// renderer marks it (data-docx-field) and measured pagination fills the
+	// live value per page
+	fieldValue?: string;
 }
 
 export interface RunProperties extends CommonProperties {
