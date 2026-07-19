@@ -41,7 +41,8 @@ export function convertLength(val: string, usage: LengthUsageType = LengthUsage.
         return val;
     }
 
-    var num = parseInt(val) * usage.mul;
+    // Word writes fractional values too (e.g. w:sz="22.5" = 11.25pt)
+    var num = parseFloat(val) * usage.mul;
 
     if (usage.min && usage.max)
         num = clamp(num, usage.min, usage.max);
