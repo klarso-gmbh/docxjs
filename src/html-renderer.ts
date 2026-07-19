@@ -707,6 +707,11 @@ section.${c}>footer { z-index: 1; }
 					// their descent; top keeps the marker's internal baseline
 					// on the text baseline (same font/line-height) without that
 					beforeValues["vertical-align"] = "top";
+					// an inline-block is a block container: the paragraph's
+					// (negative) text-indent inherits into it and would indent
+					// the marker box's OWN first line again, painting the number
+					// a full hanging width left of the box (and of the column)
+					beforeValues["text-indent"] = "0";
 				}
 
 				styleText += this.styleToString(`${selector}:before`, beforeValues);
