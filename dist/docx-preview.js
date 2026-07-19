@@ -103,27 +103,19 @@
     }
 
     const ns$1 = {
-        wordml: "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-        drawingml: "http://schemas.openxmlformats.org/drawingml/2006/main",
-        picture: "http://schemas.openxmlformats.org/drawingml/2006/picture",
-        compatibility: "http://schemas.openxmlformats.org/markup-compatibility/2006",
-        math: "http://schemas.openxmlformats.org/officeDocument/2006/math"
-    };
+        wordml: "http://schemas.openxmlformats.org/wordprocessingml/2006/main"};
     const LengthUsage = {
         Dxa: { mul: 0.05, unit: "pt" },
         Emu: { mul: 1 / 12700, unit: "pt" },
         FontSize: { mul: 0.5, unit: "pt" },
         Border: { mul: 0.125, unit: "pt", min: 0.25, max: 12 },
         Point: { mul: 1, unit: "pt" },
-        Percent: { mul: 0.02, unit: "%" },
-        LineHeight: { mul: 1 / 240, unit: "" },
-        VmlEmu: { mul: 1 / 12700, unit: "" },
-    };
+        Percent: { mul: 0.02, unit: "%" }};
     function convertLength(val, usage = LengthUsage.Dxa) {
         if (val == null || /.+(p[xt]|[%])$/.test(val)) {
             return val;
         }
-        var num = parseInt(val) * usage.mul;
+        var num = parseFloat(val) * usage.mul;
         if (usage.min && usage.max)
             num = clamp(num, usage.min, usage.max);
         return `${num.toFixed(2)}${usage.unit}`;
@@ -797,6 +789,7 @@
         parseXml(root) {
             this.rootElement = this.createRootElement();
             this.rootElement.children = this._documentParser.parseBodyElements(root);
+            this._documentParser.processFieldSegments(this.rootElement.children);
         }
     }
     class HeaderPart extends BaseHeaderFooterPart {
@@ -1016,6 +1009,9 @@
                     break;
                 case "autoHyphenation":
                     result.autoHyphenation = xml.boolAttr(el, "val");
+                    break;
+                case "evenAndOddHeaders":
+                    result.evenAndOddHeaders = xml.boolAttr(el, "val", true);
                     break;
             }
         }
@@ -1429,6 +1425,7 @@
                 item.initials = globalXmlParser.attr(el, "initials");
                 item.date = globalXmlParser.attr(el, "date");
                 item.children = this.parseBodyElements(el);
+                this.processFieldSegments(item.children);
                 result.push(item);
             }
             return result;
@@ -1437,12 +1434,54 @@
             var xbody = globalXmlParser.element(xmlDoc, "body");
             var background = globalXmlParser.element(xmlDoc, "background");
             var sectPr = globalXmlParser.element(xbody, "sectPr");
+            var children = this.parseBodyElements(xbody);
+            this.processFieldSegments(children);
             return {
                 type: DomType.Document,
-                children: this.parseBodyElements(xbody),
+                children,
                 props: sectPr ? parseSectionProperties(sectPr, globalXmlParser) : {},
                 cssStyle: background ? this.parseBackground(background) : {},
             };
+        }
+        processFieldSegments(children) {
+            var codeDepth = 0;
+            var stack = [];
+            const walk = (elems) => {
+                for (let el of elems) {
+                    if (el.type === DomType.Run) {
+                        let run = el;
+                        if (run.fieldRun) {
+                            for (let c of run.children ?? []) {
+                                if (c.type !== DomType.ComplexField)
+                                    continue;
+                                switch (c.charType) {
+                                    case "begin":
+                                        stack.push(true);
+                                        codeDepth++;
+                                        break;
+                                    case "separate":
+                                        if (stack.length && stack[stack.length - 1]) {
+                                            stack[stack.length - 1] = false;
+                                            codeDepth--;
+                                        }
+                                        break;
+                                    case "end":
+                                        if (stack.length && stack.pop())
+                                            codeDepth--;
+                                        break;
+                                }
+                            }
+                        }
+                        else if (codeDepth > 0) {
+                            run.fieldCodeContent = true;
+                        }
+                    }
+                    else if (el.children?.length) {
+                        walk(el.children);
+                    }
+                }
+            };
+            walk(children);
         }
         parseBackground(elem) {
             var result = {};
@@ -1809,7 +1848,24 @@
                         break;
                 }
             }
+            this.adjustParagraphAnchoredDrawings(result);
             return result;
+        }
+        adjustParagraphAnchoredDrawings(paragraph) {
+            var marginTop = paragraph.cssStyle?.["margin-top"];
+            if (!marginTop)
+                return;
+            for (var run of paragraph.children) {
+                if (run.type !== DomType.Run || !run.children)
+                    continue;
+                for (var child of run.children) {
+                    if (child.type === DomType.Drawing
+                        && child.cssStyle?.["--docx-anchor-rel-v"] === "paragraph"
+                        && child.cssStyle["top"]) {
+                        child.cssStyle["top"] = `calc(${child.cssStyle["top"]} - ${marginTop})`;
+                    }
+                }
+            }
         }
         parseParagraphProperties(elem, paragraph) {
             this.parseDefaultProperties(elem, paragraph.cssStyle = {}, null, c => {
@@ -1823,7 +1879,7 @@
                         paragraph.className = values.classNameOfCnfStyle(c);
                         break;
                     case "framePr":
-                        this.parseFrame(c, paragraph);
+                        this.parseFrame(c, paragraph.cssStyle);
                         break;
                     case "rPr":
                         break;
@@ -1833,10 +1889,42 @@
                 return true;
             });
         }
-        parseFrame(node, paragraph) {
+        parseFrame(node, style) {
             var dropCap = globalXmlParser.attr(node, "dropCap");
-            if (dropCap == "drop")
-                paragraph.cssStyle["float"] = "left";
+            if (dropCap == "drop") {
+                style["float"] = "left";
+                return;
+            }
+            var width = globalXmlParser.lengthAttr(node, "w");
+            var xAlign = globalXmlParser.attr(node, "xAlign");
+            var hAnchor = globalXmlParser.attr(node, "hAnchor");
+            var vAnchor = globalXmlParser.attr(node, "vAnchor") ?? "text";
+            var x = globalXmlParser.lengthAttr(node, "x");
+            if (width)
+                style["width"] = width;
+            if (vAnchor == "text" && (hAnchor == "page" || hAnchor == "margin")) {
+                if (xAlign == "right" || xAlign == "outside") {
+                    style["position"] = "absolute";
+                    style["right"] = "0";
+                }
+                else if (xAlign == "left" || xAlign == "inside") {
+                    style["position"] = "absolute";
+                    style["left"] = "0";
+                }
+                else if (x) {
+                    style["position"] = "absolute";
+                    style["left"] = x;
+                }
+                if (xAlign == "outside" || xAlign == "inside") {
+                    style["--docx-frame-x"] = xAlign;
+                    var hSpace = globalXmlParser.lengthAttr(node, "hSpace");
+                    if (hSpace)
+                        style["--docx-frame-hspace"] = hSpace;
+                }
+            }
+            else if (width) {
+                style["float"] = (xAlign == "right" || xAlign == "outside") ? "right" : "left";
+            }
         }
         parseHyperlink(node, parent) {
             var result = { type: DomType.Hyperlink, parent: parent, children: [] };
@@ -2111,6 +2199,7 @@
                 result.cssStyle['position'] = 'relative';
                 result.cssStyle["width"] = "0px";
                 result.cssStyle["height"] = "0px";
+                result.cssStyle["--docx-anchor-rel-v"] = posY.relative;
                 if (posX.offset)
                     result.cssStyle["left"] = posX.offset;
                 if (posY.offset)
@@ -2139,6 +2228,7 @@
             var spPr = globalXmlParser.element(elem, "spPr");
             var xfrm = globalXmlParser.element(spPr, "xfrm");
             result.cssStyle["position"] = "relative";
+            result.cssStyle["vertical-align"] = "bottom";
             for (var n of globalXmlParser.elements(xfrm)) {
                 switch (n.localName) {
                     case "ext":
@@ -2375,8 +2465,18 @@
                         this.parseUnderline(c, style);
                         break;
                     case "ind":
-                    case "tblInd":
                         this.parseIndentation(c, style);
+                        break;
+                    case "tblInd": {
+                        if (globalXmlParser.attr(c, "type") != "pct") {
+                            const tblIndent = globalXmlParser.lengthAttr(c, "w");
+                            if (tblIndent)
+                                style["margin-left"] = tblIndent;
+                        }
+                        break;
+                    }
+                    case "framePr":
+                        this.parseFrame(c, style);
                         break;
                     case "rFonts":
                         this.parseFont(c, style);
@@ -2390,6 +2490,7 @@
                         break;
                     case "pBdr":
                         this.parseBorderProperties(c, style);
+                        this.applyParagraphBorderSpacing(c, style);
                         break;
                     case "bdr":
                         style["border"] = values.valueOfBorder(c);
@@ -2571,6 +2672,20 @@
                 default:
                     output["height"] = globalXmlParser.lengthAttr(node, "val");
                     break;
+            }
+        }
+        applyParagraphBorderSpacing(node, style) {
+            for (var side of ["left", "right"]) {
+                var el = globalXmlParser.element(node, side) ?? globalXmlParser.element(node, side == "left" ? "start" : "end");
+                if (!el)
+                    continue;
+                var space = globalXmlParser.lengthAttr(el, "space", LengthUsage.Point);
+                if (!space)
+                    continue;
+                var sz = globalXmlParser.lengthAttr(el, "sz", LengthUsage.Border);
+                var offset = parseFloat(space) + (sz ? parseFloat(sz) : 0);
+                style[`margin-${side}`] = `-${offset.toFixed(2)}pt`;
+                style[`padding-${side}`] = space;
             }
         }
         parseBorderProperties(node, output) {
@@ -3047,17 +3162,31 @@
         renderHeaderFooter(refs, props, page, firstOfSection, into) {
             if (!refs)
                 return;
+            const evenAndOdd = this.document.settingsPart?.settings?.evenAndOddHeaders ?? false;
             var ref = (props.titlePage && firstOfSection ? refs.find(x => x.type == "first") : null)
-                ?? (page % 2 == 1 ? refs.find(x => x.type == "even") : null)
+                ?? (evenAndOdd && page % 2 == 1 ? refs.find(x => x.type == "even") : null)
                 ?? refs.find(x => x.type == "default");
-            var part = ref && this.document.findPartByRelId(ref.id, this.document.documentPart);
-            if (part) {
+            var variants = this.options.renderHeaderFooterVariants
+                ? refs.filter((x, i) => (x.type == "default" || x.type == null
+                    || (x.type == "first" && props.titlePage)
+                    || (x.type == "even" && evenAndOdd))
+                    && refs.findIndex(y => y.type == x.type) == i)
+                : (ref ? [ref] : []);
+            for (const variant of variants) {
+                const part = this.document.findPartByRelId(variant.id, this.document.documentPart);
+                if (!part)
+                    continue;
                 this.currentPart = part;
                 if (!this.usedHederFooterParts.includes(part.path)) {
                     this.processElement(part.rootElement);
                     this.usedHederFooterParts.push(part.path);
                 }
                 const [el] = this.renderElements([part.rootElement], into);
+                if (this.options.renderHeaderFooterVariants) {
+                    el.setAttribute("data-hf-type", variant.type ?? "default");
+                    if (variant !== ref)
+                        el.style.display = "none";
+                }
                 if (props?.pageMargins) {
                     if (part.rootElement.type === DomType.Header) {
                         el.style.marginTop = `calc(${props.pageMargins.header} - ${props.pageMargins.top})`;
@@ -3066,6 +3195,9 @@
                     else if (part.rootElement.type === DomType.Footer) {
                         el.style.marginBottom = `calc(${props.pageMargins.footer} - ${props.pageMargins.bottom})`;
                         el.style.minHeight = `calc(${props.pageMargins.bottom} - ${props.pageMargins.footer})`;
+                        el.style.display = "flex";
+                        el.style.flexDirection = "column";
+                        el.style.justifyContent = "flex-end";
                     }
                 }
                 this.currentPart = null;
@@ -3219,11 +3351,26 @@ section.${c}>footer { z-index: 1; }
                         });
                     }
                     resetCounters.push(counterReset);
-                    styleText += this.styleToString(`${selector}:before`, {
+                    var numRunStyle = num.rStyle;
+                    var linkedStyle = this.findStyle(num.pStyleName);
+                    var linkedRun = linkedStyle?.styles?.find(s => s.target == "span")?.values;
+                    if (linkedRun)
+                        numRunStyle = { ...linkedRun, ...num.rStyle };
+                    var beforeValues = {
                         "content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
                         "counter-increment": counter,
-                        ...num.rStyle,
-                    });
+                        ...numRunStyle,
+                    };
+                    if (num.suff == null || num.suff == "tab") {
+                        var hangingIndent = num.pStyle?.["text-indent"];
+                        beforeValues["display"] = "inline-block";
+                        beforeValues["min-width"] = (hangingIndent && parseFloat(hangingIndent) < 0)
+                            ? hangingIndent.substring(1)
+                            : (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
+                        beforeValues["vertical-align"] = "top";
+                        beforeValues["text-indent"] = "0";
+                    }
+                    styleText += this.styleToString(`${selector}:before`, beforeValues);
                 }
                 else {
                     listStyleType = this.numFormatToCssValue(num.format);
@@ -3563,7 +3710,7 @@ section.${c}>footer { z-index: 1; }
             return this.createElement("span", { id: elem.name });
         }
         renderRun(elem) {
-            if (elem.fieldRun)
+            if (elem.fieldRun || elem.fieldCodeContent)
                 return null;
             const result = this.createElement("span");
             if (elem.id)
@@ -3907,6 +4054,7 @@ section.${c}>footer { z-index: 1; }
         renderEndnotes: true,
         useBase64URL: false,
         renderChanges: false,
+        renderHeaderFooterVariants: false,
         renderComments: false,
         renderAltChunks: true
     };
