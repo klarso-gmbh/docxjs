@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html>
+<!--
+  Measured-pagination viewer example.
+
+  Demonstrates rendering a marker-less .docx with `measuredPagination: true`
+  (docx-preview measures a first pass, inserts lastRenderedPageBreak markers
+  and re-renders so pages split natively), a caller-provided `hyphenate`
+  callback, and the two purely presentational touches most viewers want -
+  Ctrl+wheel zoom and side-by-side pages - kept here in the consumer, not in
+  the library.
+
+  Build the library first: `npm run build-prod` (this page loads dist/).
+-->
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>docx-preview - measured pagination viewer</title>
+	<script crossorigin src="https://unpkg.com/jszip/dist/jszip.min.js"></script>
+	<script src="../dist/docx-preview.js"></script>
+	<style>
+		body { margin: 0; font: 14px system-ui, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+		.toolbar { display: flex; gap: 8px; align-items: center; padding: 8px; background: #f0f0f0; border-bottom: 1px solid #ccc; }
+		.viewport { flex: 1; overflow: auto; background: #9ea3a8; }
+		.hint { color: #555; margin-left: auto; }
+
+		/* Side-by-side pages: docx-preview lays the page sheets out in
+		   .docx-wrapper as a flex column; overriding it to a centered wrapping
+		   row shows multiple pages across, like a print preview. The library
+		   injects its own .docx-wrapper rule after this one, so !important is
+		   needed to win the cascade. Pure CSS, no library change. */
+		.docx-wrapper { flex-flow: row wrap !important; justify-content: center !important; align-items: flex-start !important; gap: 24px; }
+	</style>
+</head>
+
+<body>
+	<div class="toolbar">
+		<input id="file" type="file" accept=".docx" />
+		<select id="sample">
+			<option value="page-layout">sample: page-layout</option>
+			<option value="numbering">sample: numbering</option>
+			<option value="table">sample: table</option>
+			<option value="header-footer">sample: header-footer</option>
+			<option value="line-spacing">sample: line-spacing</option>
+		</select>
+		<span class="hint">Ctrl + mouse wheel to zoom</span>
+	</div>
+	<div id="viewport" class="viewport"></div>
+
+	<script>
+		const viewport = document.getElementById("viewport");
+		const container = document.createElement("div");
+		viewport.appendChild(container);
+
+		// A trivial hyphenation stub. A real consumer plugs in a dictionary
+		// hyphenator (e.g. Hypher, or a platform engine) and returns each word
+		// with U+00AD soft hyphens at its break points; the library then breaks
+		// justified lines at them. This naive stub just breaks long words.
+		function hyphenateStub(words) {
+			const SHY = String.fromCharCode(0xAD);
+			return words.map(w => w.length < 8 ? w
+				: w.replace(/(.{4})(?=.{3})/g, "$1" + SHY));
+		}
+
+		async function render(source) {
+			await docx.renderAsync(source, container, null, Object.assign({}, docx.defaultOptions, {
+				measuredPagination: true,
+				hyphenate: hyphenateStub,
+				justificationShrink: 0.4,
+				experimental: true,
+			}));
+			applyZoom();
+		}
+
+		// Zoom is applied AFTER renderAsync returns. Because measuredPagination
+		// does its measurement inside renderAsync, nothing here interferes with
+		// it - CSS zoom scaling only affects the finished output.
+		let zoom = 1;
+		function applyZoom() {
+			const wrapper = container.querySelector(".docx-wrapper");
+			if (wrapper) wrapper.style.zoom = zoom;
+		}
+		viewport.addEventListener("wheel", ev => {
+			if (!ev.ctrlKey) return;
+			ev.preventDefault();
+			zoom = Math.min(4, Math.max(0.25, zoom * (ev.deltaY < 0 ? 1.1 : 1 / 1.1)));
+			applyZoom();
+		}, { passive: false });
+
+		document.getElementById("file").addEventListener("change", e => {
+			if (e.target.files[0]) render(e.target.files[0]);
+		});
+		const sample = document.getElementById("sample");
+		sample.addEventListener("change", () => loadSample(sample.value));
+
+		async function loadSample(name) {
+			const resp = await fetch(`../tests/render-test/${name}/document.docx`);
+			render(await resp.blob());
+		}
+		loadSample(sample.value);
+	</script>
+</body>
+</html>
