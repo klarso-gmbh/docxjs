@@ -52,6 +52,10 @@ renderAsync(
         ignoreFonts: boolean = false, //disables fonts rendering
         breakPages: boolean = true, //enables page breaking on page breaks
         ignoreLastRenderedPageBreak: boolean = true, //disables page breaking on lastRenderedPageBreak elements
+        measuredPagination: boolean = false, //render, measure where content overflows each page, insert lastRenderedPageBreak markers at those points and re-render — breaks pages without markers in the file (see "Measured pagination"). Also applies Word "auto" line metrics, justified-space shrink and hyphenation.
+        hyphenate: (words: string[]) => (string[] | Promise<string[]>) = null, //hyphenation callback used by measuredPagination: given the unique words (letters, length >= 5), return each word with soft hyphens (U+00AD) inserted, in the same order
+        onMeasuredBreaks: (breaks: { paraIndex: number, offset: number }[]) => void = null, //reports the breaks measuredPagination decided, addressed against the ORIGINAL document: paraIndex = paragraph index in document order, offset = soft-hyphen-free character offset within it (0 for whole-block breaks)
+        justificationShrink: number = 0.4, //measuredPagination: fraction by which justified inter-word spaces may shrink (Word 2013+ line-breaking behavior)
         experimental: boolean = false, //enables experimental features (tab stops calculation)
         trimXmlDeclaration: boolean = true, //if true, xml declaration will be removed from xml documents before parsing
         useBase64URL: boolean = false, //if true, images, fonts, etc. will be converted to base 64 URL, otherwise URL.createObjectURL is used
@@ -93,18 +97,24 @@ Table of contents is built using the TOC fields and there is no efficient way to
 
 Breaks
 ------
-Currently library does break pages:
-- if user/manual page break `<w:br w:type="page"/>` is inserted - when user insert page break
-- if application page break `<w:lastRenderedPageBreak/>` is inserted - could be inserted by editor application like MS word (`ignoreLastRenderedPageBreak` should be set to false)
-- if page settings for paragraph is changed - ex: user change settings from portrait to landscape page
+The library breaks pages at markers it finds in the document:
 
-Realtime page breaking is not implemented because it's requires re-calculation of sizes on each insertion and that could affect performance a lot. 
+- **Manual page break** — `<w:br w:type="page"/>`, inserted by the user.
+- **Rendered page break** — `<w:lastRenderedPageBreak/>`, a hint that editors such as MS Word write to record where a page broke the last time the document was laid out. Honored only when `ignoreLastRenderedPageBreak` is `false`; it defaults to `true`, so set it to `false` to break on these.
+- **Section / page-setup change** — e.g. a switch from portrait to landscape.
 
-If page breaking is crucial for you, I would recommend:
-- try to insert manual break point as much as you could
-- try use editors like MS Word, that inserts `<w:lastRenderedPageBreak/>` break points
+A document exported without any of these markers renders as one continuous sheet. Splitting it into pages means laying the document out and measuring where content overflows each page — not done on every edit, because re-measuring is expensive. The `measuredPagination` option performs that measurement as an opt-in pass.
 
-NOTE: by default `ignoreLastRenderedPageBreak` is set to `true`. You may need to set it to `false`, to make library break by `<w:lastRenderedPageBreak/>` break points
+Measured pagination
+------
+`measuredPagination: true` breaks pages for documents that carry no break markers. It renders the document once, measures where content overflows each page, inserts `<w:lastRenderedPageBreak/>` markers into the model at those points, and re-renders — so pages split through the normal render path (per-page header/footer selection and mirrored margins included). It also applies the layout metrics CSS does not express by default, so line breaks track a word processor's closely:
+
+- "auto" line spacing measured from the font's natural line height (not `line-height: normal`),
+- justified inter-word space shrinking (Word 2013+; tunable via `justificationShrink`),
+- automatic hyphenation via the caller-supplied `hyphenate` callback (the document bytes are never modified — soft hyphens live only in the render model),
+- live `PAGE` / `NUMPAGES` / `SECTIONPAGES` field values, stamped per page after pagination.
+
+The extra render pass is why it is opt-in. `onMeasuredBreaks` reports the break positions it chose, addressed against the original document, for tooling that wants to persist them back into the file.
 
 Status and stability
 ------
