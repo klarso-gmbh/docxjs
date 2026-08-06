@@ -1298,7 +1298,9 @@ export class DocumentParser {
 					break;
 
 				case "tblHeader":
-					row.isHeader = xml.boolAttr(c, "val");
+					// CT_OnOff: the element on its own means true (Word writes
+					// <w:tblHeader/> without a val for a repeating header row)
+					row.isHeader = xml.boolAttr(c, "val", true);
 					break;
 
 				case "gridBefore":

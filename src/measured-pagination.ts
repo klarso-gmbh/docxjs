@@ -370,6 +370,22 @@ function moveFollowing(toParent: HTMLElement, el: Element) {
 	while (el) { const next = el.nextElementSibling; toParent.appendChild(el); el = next; }
 }
 
+/* Leading w:tblHeader rows of a table - Word and LibreOffice repeat those at the
+   top of every page the table continues on, which costs the continuation page
+   their height. In a continuation table they are clones, and a clone carries no
+   model row: the row indices of the break descriptors count real rows only. */
+function headerRowCount(table: HTMLTableElement): number {
+	let n = 0;
+	while (n < table.rows.length && table.rows[n].hasAttribute("data-docx-thead")) n++;
+	return n;
+}
+
+function headerCloneCount(table: HTMLTableElement): number {
+	let n = 0;
+	while (n < table.rows.length && table.rows[n].hasAttribute("data-docx-hdrclone")) n++;
+	return n;
+}
+
 function splitTableAt(table: HTMLTableElement, splitIdx: number): HTMLTableElement {
 	const cont = table.cloneNode(false) as HTMLTableElement;
 	for (let i = 0; i < table.children.length; i++) {
@@ -377,9 +393,16 @@ function splitTableAt(table: HTMLTableElement, splitIdx: number): HTMLTableEleme
 	}
 	const body = document.createElement("tbody");
 	cont.appendChild(body);
+	const hdr = headerRowCount(table);
+	for (let i = 0; i < hdr; i++) {
+		const clone = table.rows[i].cloneNode(true) as HTMLElement;
+		clone.setAttribute("data-docx-hdrclone", "1");
+		clone.removeAttribute("data-docx-mi");
+		body.appendChild(clone);
+	}
 	while (table.rows.length > splitIdx) body.appendChild(table.rows[splitIdx]); // .rows is live
 	const base = parseInt(table.getAttribute("data-docx-rowbase") || "0", 10) || 0;
-	cont.setAttribute("data-docx-rowbase", String(base + splitIdx));
+	cont.setAttribute("data-docx-rowbase", String(base + splitIdx - headerCloneCount(table)));
 	return cont;
 }
 
@@ -562,12 +585,17 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 		const rows = table.rows;
 		const rowbase = parseInt(table.getAttribute("data-docx-rowbase") || "0", 10) || 0;
 		const tmi = miOf(table);
+		// repeated header rows are layout, not content: they carry no model row,
+		// and a split may not land inside them
+		const clones = headerCloneCount(table);
+		const modelRow = (domIdx: number) => rowbase + domIdx - clones;
 		let splitIdx = -1;
 		for (let j = 0; j < rows.length; j++) {
 			if (rows[j].getBoundingClientRect().bottom > limit + EPS) { splitIdx = j; break; }
 		}
 		if (splitIdx < 0) splitIdx = rows.length;
-		if (splitIdx === 0) {
+		if (splitIdx > clones && splitIdx <= headerRowCount(table)) splitIdx = clones; // never split off a bare header
+		if (splitIdx <= clones) {
 			if (!isFirst) {
 				// starts too low: move the whole table (and the rest) over
 				if (tmi != null) ctx.record(rowbase > 0 ? { kind: "tableRow", mi: tmi, row: rowbase } : { kind: "before", mi: tmi });
@@ -575,11 +603,11 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 				moveFollowing(contentRoot(sheetA), crossing);
 				return sheetA;
 			}
-			if (rows.length <= 1) return breakAfter(section, crossing, ctx); // single monster row
-			splitIdx = 1;
+			if (rows.length <= clones + 1) return breakAfter(section, crossing, ctx); // single monster row
+			splitIdx = clones + 1;
 		}
 		if (splitIdx >= rows.length && rows.length > 0 && !crossing.nextElementSibling) return null;
-		if (tmi != null && splitIdx < rows.length) ctx.record({ kind: "tableRow", mi: tmi, row: rowbase + splitIdx });
+		if (tmi != null && splitIdx < rows.length) ctx.record({ kind: "tableRow", mi: tmi, row: modelRow(splitIdx) });
 		const sheetB = newSheet(section);
 		const contArt = contentRoot(sheetB);
 		if (splitIdx < rows.length) contArt.appendChild(splitTableAt(table, splitIdx));

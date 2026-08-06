@@ -596,11 +596,24 @@ export class HtmlRenderer {
 			if (this.rowHasPageBreak(rows[ri])) breakRows.push(ri);
 		if (!breakRows.length) return [table];
 
+		// Word and LibreOffice repeat the w:tblHeader rows on every page the table
+		// continues on; the measured pass laid the table out that way, so the
+		// segments have to carry them too or the pages come out shorter than
+		// measured. The rows are rendered a second time, not copied - nothing in
+		// the model addresses a row by identity.
+		let headerRows: OpenXmlElement[] = [];
+		for (const r of rows) {
+			if (!(r as WmlTableRow).isHeader) break;
+			headerRows.push(r);
+		}
+
 		const bounds = [0, ...breakRows, rows.length];
 		const segs: WmlTable[] = [];
 		for (let bi = 0; bi < bounds.length - 1; bi++) {
-			const seg = rows.slice(bounds[bi], bounds[bi + 1]);
+			let seg = rows.slice(bounds[bi], bounds[bi + 1]);
 			if (!seg.length) continue;
+			if (bi > 0 && headerRows.length && bounds[bi] >= headerRows.length)
+				seg = headerRows.concat(seg);
 			// Every segment is a CLONE - assigning the first one back to
 			// table.children would drop the rows behind the break from the model,
 			// and measured pagination renders the same model twice: the second
@@ -1559,7 +1572,14 @@ section.${c}>footer { z-index: 0; }
 
 		this.currentCellPosition.row++;
 
-		return this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+		const result = this.toHTML(elem, ns.html, "tr", children) as HTMLTableRowElement;
+
+		// w:tblHeader - the measured paginator repeats these at the top of every
+		// page the table continues on, the way Word and LibreOffice do
+		if (elem.isHeader)
+			result.setAttribute("data-docx-thead", "1");
+
+		return result;
 	}
 
 	renderTableCellPlaceholder(colSpan: number) {
