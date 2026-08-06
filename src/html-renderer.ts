@@ -572,17 +572,23 @@ export class HtmlRenderer {
 			|| prev.pageSize?.height != next.pageSize?.height;
 	}
 
-	// scans a table row for an honored page break (measured pagination inserts
-	// one into a cell to split the table there)
+	// Scans a table row for a page break that splits the table there. Only the
+	// lastRenderedPageBreak markers measured pagination inserts count: Word does
+	// NOT break a page at a MANUAL break inside a table cell - it lays the table
+	// out as if the break were not there (verified against Word's PDF for a
+	// document whose tables carry a trailing <w:br w:type="page"/> in their last
+	// cell) - so honoring those would tear a table apart where Word keeps it.
 	rowHasPageBreak(row: OpenXmlElement): boolean {
 		const scan = (el: OpenXmlElement): boolean =>
-			this.isPageBreakElement(el) || (el.children?.some(scan) ?? false);
+			(el.type == DomType.Break && (el as WmlBreak).break == "lastRenderedPageBreak"
+				&& !this.options.ignoreLastRenderedPageBreak)
+			|| (el.children?.some(scan) ?? false);
 		return row.children?.some(scan) ?? false;
 	}
 
-	// splits a table into row segments at cell-internal page breaks; the first
-	// segment reuses the table object, the rest are clones keeping the columns
-	// (widths). Returns [table] when there is nothing to split.
+	// splits a table into row segments at cell-internal page breaks; every
+	// segment is a clone keeping the columns (widths). Returns [table] when there
+	// is nothing to split.
 	splitTableByRowBreaks(table: WmlTable): WmlTable[] {
 		const rows = table.children ?? [];
 		const breakRows: number[] = [];
