@@ -1519,10 +1519,22 @@ export class DocumentParser {
 						style["display"] = "none";
 					break;
 
-				case "kern":
-					//TODO
-					//style['letter-spacing'] = xml.lengthAttr(elem, 'val', LengthUsage.FontSize);
+				// w:kern turns PAIR KERNING on, for text at least w:val big (half
+				// points). Word and LibreOffice do not kern otherwise - they measure
+				// a line as the plain sum of glyph advances - while a browser kerns
+				// by default, which makes lines measure narrower and wrap later than
+				// in the document's own renderer. The default is set once in the
+				// document style (renderDefaultStyle); this only turns kerning back
+				// ON where the document asks for it.
+				case "kern": {
+					const min = xml.lengthAttr(c, "val", LengthUsage.FontSize);
+					const size = style["font-size"];
+					// no size in this property bag: it comes from the style chain, so
+					// honour the request - the threshold only matters for small text
+					if (!min || !size || parseFloat(size) >= parseFloat(min))
+						style["font-kerning"] = "normal";
 					break;
+				}
 
 				case "noWrap":
 					//TODO
