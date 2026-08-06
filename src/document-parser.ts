@@ -678,6 +678,12 @@ export class DocumentParser {
 
 			return true;
 		});
+
+		// Only now is the paragraph's own indent known - the border spacing has to
+		// compose with it (and with the one its numbering level brings), so it is
+		// applied last rather than in the pBdr case above.
+		const pBdr = xml.element(elem, "pBdr");
+		if (pBdr) this.applyParagraphBorderSpacing(pBdr, paragraph.cssStyle);
 	}
 
 	parseFrame(node: Element, style: Record<string, string>) {
@@ -1496,7 +1502,8 @@ export class DocumentParser {
 
 				case "pBdr":
 					this.parseBorderProperties(c, style);
-					this.applyParagraphBorderSpacing(c, style);
+					// the spacing is applied once every property is known, see
+					// parseParagraphProperties - it has to compose with the indent
 					break;
 
 				case "bdr":
@@ -1660,8 +1667,17 @@ export class DocumentParser {
 
 		if (firstLine) style["text-indent"] = firstLine;
 		if (hanging) style["text-indent"] = `-${hanging}`;
-		if (left || start) style["margin-inline-start"] = left || start;
-		if (right || end) style["margin-inline-end"] = right || end;
+		// the custom property carries the same value into the cascade, so a
+		// paragraph whose indent comes from its NUMBERING LEVEL (a class rule) can
+		// still compose with it inline - see applyParagraphBorderSpacing
+		if (left || start) {
+			style["margin-inline-start"] = left || start;
+			style["--docx-ind-start"] = left || start;
+		}
+		if (right || end) {
+			style["margin-inline-end"] = right || end;
+			style["--docx-ind-end"] = right || end;
+		}
 	}
 
 	parseSpacing(node: Element, style: Record<string, string>) {
@@ -1730,25 +1746,36 @@ export class DocumentParser {
 	// Word draws paragraph borders w:space points away from the text WITHOUT
 	// moving the text (change bars stand off in the margin): pull the border
 	// outward with a negative margin and pad the text back to its column
-	// position. Left/right only - the change-bar case; top/bottom borders
-	// keep plain flow behavior. Limitation: the inline margin overrides a
-	// numbering class margin (no known document combines both with an indent).
+	// position. Left/right only - the change-bar case; top/bottom borders keep
+	// plain flow behavior.
+	//
+	// The offset must SUBTRACT FROM the indent the paragraph already has, not
+	// replace it: an indented list item with change bars (Word's own diff
+	// markings on a bulleted paragraph) would otherwise lose its indent - the
+	// inline margin wins over the numbering class - and its lines would run the
+	// full column width, breaking in different places than Word's.
 	applyParagraphBorderSpacing(node: Element, style: Record<string, string>) {
-		for (var side of ["left", "right"]) {
-			var el = xml.element(node, side) ?? xml.element(node, side == "left" ? "start" : "end");
+		for (const side of ["left", "right"]) {
+			const el = xml.element(node, side) ?? xml.element(node, side == "left" ? "start" : "end");
 
 			if (!el)
 				continue;
 
-			var space = xml.lengthAttr(el, "space", LengthUsage.Point);
+			const space = xml.lengthAttr(el, "space", LengthUsage.Point);
 
 			if (!space)
 				continue;
 
-			var sz = xml.lengthAttr(el, "sz", LengthUsage.Border);
-			var offset = parseFloat(space) + (sz ? parseFloat(sz) : 0);
+			const sz = xml.lengthAttr(el, "sz", LengthUsage.Border);
+			const offset = parseFloat(space) + (sz ? parseFloat(sz) : 0);
+			// the paragraph's own w:ind, else the indent of its numbering level -
+			// that one lives in a class rule, reachable through the custom property
+			// parseIndentation emits next to it
+			const logical = side == "left" ? "start" : "end";
+			const own = style[`margin-inline-${logical}`];
+			const base = own ?? `var(--docx-ind-${logical}, 0pt)`;
 
-			style[`margin-${side}`] = `-${offset.toFixed(2)}pt`;
+			style[`margin-inline-${logical}`] = `calc(${base} - ${offset.toFixed(2)}pt)`;
 			style[`padding-${side}`] = space;
 		}
 	}
