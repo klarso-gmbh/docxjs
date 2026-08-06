@@ -654,6 +654,7 @@ export class HtmlRenderer {
 
 			if (elem.type == DomType.Paragraph) {
 				const p = elem as WmlParagraph;
+				const owner = current;   // the section elem was just pushed into
 
 				var sectProps = p.sectionProps;
 				var pBreakIndex = -1;
@@ -678,16 +679,25 @@ export class HtmlRenderer {
 					let splitRun = rBreakIndex < breakRun.children.length - 1;
 
 					if (pBreakIndex < p.children.length - 1 || splitRun) {
-						var children = elem.children;
+						const children = elem.children;
+						// Split into two CLONES and swap the first one in for the
+						// element already collected. Mutating the model instead would
+						// consume the break: measured pagination renders the same
+						// model twice, and by the second pass the paragraph no longer
+						// carries the marker - the page silently stops breaking there.
+						const head = { ...elem, children: children.slice(0, pBreakIndex) };
 						var newParagraph = { ...elem, children: children.slice(pBreakIndex) };
-						elem.children = children.slice(0, pBreakIndex);
 
 						if (splitRun) {
-							let runChildren = breakRun.children;
-							let newRun = { ...breakRun, children: runChildren.slice(0, rBreakIndex) };
-							elem.children.push(newRun);
-							breakRun.children = runChildren.slice(rBreakIndex);
+							const runChildren = breakRun.children;
+							head.children = head.children.concat([
+								{ ...breakRun, children: runChildren.slice(0, rBreakIndex) }]);
+							newParagraph.children = ([
+								{ ...breakRun, children: runChildren.slice(rBreakIndex) }
+							] as OpenXmlElement[]).concat(children.slice(pBreakIndex + 1));
 						}
+
+						owner.elements[owner.elements.length - 1] = head;
 
 						// re-inject the continuation so it is re-scanned for its own
 						// further breaks (a continuation must not repeat the number,
@@ -707,7 +717,12 @@ export class HtmlRenderer {
 								newParagraph.children = newParagraph.children.slice(1);
 							} else {
 								const bi = lead.children.findIndex(this.isPageBreakElement.bind(this));
-								if (bi >= 0) lead.children = lead.children.filter((c, k) => k !== bi);
+								if (bi >= 0) {
+									// again a clone - the run belongs to the model
+									newParagraph.children = ([
+										{ ...lead, children: lead.children.filter((c, k) => k !== bi) }
+									] as OpenXmlElement[]).concat(newParagraph.children.slice(1));
+								}
 							}
 						}
 						if (newParagraph.children.length)
