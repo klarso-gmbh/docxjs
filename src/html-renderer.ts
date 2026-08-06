@@ -595,8 +595,13 @@ export class HtmlRenderer {
 		for (let bi = 0; bi < bounds.length - 1; bi++) {
 			const seg = rows.slice(bounds[bi], bounds[bi + 1]);
 			if (!seg.length) continue;
-			if (segs.length === 0) { table.children = seg; segs.push(table); }
-			else segs.push({ ...table, children: seg } as WmlTable);
+			// Every segment is a CLONE - assigning the first one back to
+			// table.children would drop the rows behind the break from the model,
+			// and measured pagination renders the same model twice: the second
+			// pass would neither split the table nor even show those rows.
+			// $rowbase keeps the measured pass addressing rows of the ORIGINAL
+			// table, whose $mi all segments share.
+			segs.push({ ...table, children: seg, $rowbase: bounds[bi] } as WmlTable);
 		}
 		return segs;
 	}
@@ -1496,6 +1501,11 @@ section.${c}>footer { z-index: 0; }
 
 		if (this.options.measuredPagination && (elem as any).$mi != null)
 			result.setAttribute("data-docx-mi", String((elem as any).$mi));
+
+		// a segment of a table split at its own row breaks: tell the measured pass
+		// which row of the original table this segment starts at
+		if (this.options.measuredPagination && (elem as any).$rowbase)
+			result.setAttribute("data-docx-rowbase", String((elem as any).$rowbase));
 
 		return result;
 	}
