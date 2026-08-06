@@ -173,14 +173,37 @@ export function applyMeasuredGeometry(
 		cache[faceKey] = h / 256;
 		return cache[faceKey];
 	}
-	function probeWidth(hostEl: HTMLElement, text: string): number {
+	function probeWidth(hostEl: HTMLElement, text: string, sizePx: number = 256): number {
 		const probe = document.createElement("span");
-		probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font-size:256px";
+		probe.style.cssText = "position:absolute;visibility:hidden;white-space:pre;font-size:" + sizePx + "px";
 		probe.textContent = text;
 		hostEl.appendChild(probe);
 		const w = probe.getBoundingClientRect().width;
 		probe.remove();
 		return w;
+	}
+
+	/* Browsers measure glyph advances with size-quantised (hinted) values: at
+	   body sizes a line comes out a few hundredths of a percent NARROWER than
+	   the font's ideal outlines - which is what Writer and Word lay out with
+	   (both take the plain sum of advances off the reference device, see
+	   SwFntObj::GetTextSize / GetTextArray). 0.04% is 0.2pt on a 450pt line -
+	   enough to keep a word on a line that the document's own renderer wraps.
+	   Measure the error per face+size (the same string large, where the
+	   quantisation is negligible, against the real size) and hand it back as
+	   letter-spacing, so line breaking agrees with the renderer that produces
+	   the final PDF. */
+	const BIAS_SAMPLE = "AVWaevnoiszmMW 0123456789 die Nachweisführung.";
+	function probeAdvanceBias(biasKey: string, hostEl: HTMLElement, sizePx: number): number | null {
+		if (cache[biasKey] !== undefined) return cache[biasKey];
+		const ideal = probeWidth(hostEl, BIAS_SAMPLE) / 256 * sizePx;
+		const real = probeWidth(hostEl, BIAS_SAMPLE, sizePx);
+		if (!(ideal > 0) || !(real > 0)) return null;
+		const bias = (ideal - real) / BIAS_SAMPLE.length;
+		// a sane bias is a small fraction of a pixel; anything else is a
+		// substituted font or an engine that does not quantise at all
+		cache[biasKey] = (bias > 0 && bias < 0.05) ? bias : 0;
+		return cache[biasKey];
 	}
 	function probeSpace(spaceKey: string, hostEl: HTMLElement): number | null {
 		if (cache[spaceKey] !== undefined) return cache[spaceKey];
@@ -193,7 +216,7 @@ export function applyMeasuredGeometry(
 	const hfMap = buildHeaderFooterMap(host, hfPartsByPath);
 
 	// pass A: resolve every paragraph's face and probe where possible
-	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; spaceKey: string | null; }
+	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; spaceKey: string | null; biasKey: string; }
 	const items: Item[] = [];
 	const faceOfFamily: Record<string, Record<string, boolean>> = {};
 	const paras = host.querySelectorAll<HTMLElement>("section.docx p");
@@ -224,8 +247,11 @@ export function applyMeasuredGeometry(
 		}
 		const shrink = justifyShrink && getComputedStyle(p).textAlign === "justify";
 		if (shrink) probeSpace("sp:" + faceKey, span || p);
-		if (!hasOwnLine || shrink)
-			items.push({ p, model, size: parseFloat(cs.fontSize), family: cs.fontFamily, hasOwnLine, spaceKey: shrink ? "sp:" + faceKey : null });
+		const size = parseFloat(cs.fontSize);
+		const biasKey = "bias:" + faceKey + "|" + size;
+		probeAdvanceBias(biasKey, span || p, size);
+		items.push({ p, model, size, family: cs.fontFamily, hasOwnLine,
+			spaceKey: shrink ? "sp:" + faceKey : null, biasKey });
 	}
 
 	// pass B: one line ratio per FAMILY = the minimum of its probed faces.
@@ -258,6 +284,14 @@ export function applyMeasuredGeometry(
 			const ws = (shrink * cache[it.spaceKey] * it.size).toFixed(2) + "px";
 			css["word-spacing"] = ws;
 			it.p.style.wordSpacing = ws;
+		}
+		// hand back what the engine's size quantisation swallowed, so lines break
+		// where the renderer that produces the final document breaks them
+		const bias = cache[it.biasKey];
+		if (bias) {
+			const ls = bias.toFixed(4) + "px";
+			css["letter-spacing"] = ls;
+			it.p.style.letterSpacing = ls;
 		}
 	}
 }
