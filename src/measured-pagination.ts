@@ -216,7 +216,7 @@ export function applyMeasuredGeometry(
 	const hfMap = buildHeaderFooterMap(host, hfPartsByPath);
 
 	// pass A: resolve every paragraph's face and probe where possible
-	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; spaceKey: string | null; biasKey: string; }
+	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; spaceKey: string | null; biasKey: string; italic: boolean; }
 	const items: Item[] = [];
 	const faceOfFamily: Record<string, Record<string, boolean>> = {};
 	const paras = host.querySelectorAll<HTMLElement>("section.docx p");
@@ -251,7 +251,8 @@ export function applyMeasuredGeometry(
 		const biasKey = "bias:" + faceKey + "|" + size;
 		probeAdvanceBias(biasKey, span || p, size);
 		items.push({ p, model, size, family: cs.fontFamily, hasOwnLine,
-			spaceKey: shrink ? "sp:" + faceKey : null, biasKey });
+			spaceKey: shrink ? "sp:" + faceKey : null, biasKey,
+			italic: cs.fontStyle === "italic" || cs.fontStyle === "oblique" });
 	}
 
 	// pass B: one line ratio per FAMILY = the minimum of its probed faces.
@@ -292,6 +293,16 @@ export function applyMeasuredGeometry(
 			const ls = bias.toFixed(4) + "px";
 			css["letter-spacing"] = ls;
 			it.p.style.letterSpacing = ls;
+		}
+
+		// Writer keeps a slice of the line free for the overhang of italic text:
+		//   if (ITALIC_NONE != rInf.GetFont()->GetItalic() && !rInf.NotEOL())
+		//       nLineWidth -= nPorHeight / 12;                (sw/.../text/guess.cxx)
+		// so an italic line wraps a word earlier than its advances alone would.
+		if (it.italic) {
+			const pad = (it.size * (lineMul ? lineMul * familyRatio[it.family] : 1.2) / 12).toFixed(2) + "px";
+			css["padding-right"] = pad;
+			it.p.style.paddingRight = pad;
 		}
 	}
 }
