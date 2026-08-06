@@ -1006,8 +1006,10 @@ export class DocumentParser {
 		let simplePos = xml.boolAttr(node, "simplePos");
 		let behindDoc = xml.boolAttr(node, "behindDoc");
 
-		let posX = { relative: "page", align: "left", offset: "0" };
-		let posY = { relative: "page", align: "top", offset: "0" };
+		// hasAlign: the position came from an <wp:align>, not from a <wp:posOffset>.
+		// Only an offset can be placed against its relativeFrom base further down.
+		let posX = { relative: "page", align: "left", offset: "0", hasAlign: false };
+		let posY = { relative: "page", align: "top", offset: "0", hasAlign: false };
 
 		for (var n of xml.elements(node)) {
 			switch (n.localName) {
@@ -1032,8 +1034,10 @@ export class DocumentParser {
 
 						pos.relative = xml.attr(n, "relativeFrom") ?? pos.relative;
 
-						if (alignNode)
+						if (alignNode) {
 							pos.align = alignNode.textContent;
+							pos.hasAlign = true;
+						}
 
 						if (offsetNode)
 							pos.offset = convertLength(offsetNode.textContent, LengthUsage.Emu);
@@ -1070,8 +1074,13 @@ export class DocumentParser {
 			result.cssStyle['position'] = 'relative';
 			result.cssStyle["width"] = "0px";
 			result.cssStyle["height"] = "0px";
-			result.cssStyle["--docx-anchor-rel-v"] = posY.relative;
-			result.cssStyle["--docx-anchor-rel-h"] = posX.relative;
+			// The base the offset is measured from. The anchor is laid out at the
+			// inline position of its run; a post-attach pass moves it to that base
+			// once the page geometry is known (see positionAnchoredFrames).
+			if (!posY.hasAlign)
+				result.cssStyle["--docx-anchor-rel-v"] = posY.relative;
+			if (!posX.hasAlign)
+				result.cssStyle["--docx-anchor-rel-h"] = posX.relative;
 
 			if (posX.offset)
 				result.cssStyle["left"] = posX.offset;

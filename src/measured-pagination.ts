@@ -856,6 +856,34 @@ export async function hyphenateModel(body: DocumentElement, hyphenate: (words: s
    createPageElement. Inside/outside-anchored frames (marked by the renderer via
    --docx-frame-x) go to the OUTSIDE margin of their page, inner edge hSpace from
    the text column: outer inset = margin - frame width - hSpace. */
+// Where an anchored drawing's horizontal offset is measured from. null leaves it
+// at the inline position it was laid out at - which is what "character" means,
+// and what the bases we do not model are left at.
+function anchorBaseX(rel: string | null, sheet: DOMRect, padLeft: number, padRight: number): number | null {
+	switch (rel) {
+		case "page": return sheet.left;
+		case "margin":
+		case "column": return sheet.left + padLeft;   // one column: the text area
+		case "rightMargin": return sheet.right - padRight;
+		default: return null;
+	}
+}
+
+// Same for the vertical offset. "line" is the inline position, so null; for
+// "paragraph" Word measures from the paragraph's MARGIN box, which the parser
+// already compensates for by folding the paragraph's top margin into the offset.
+function anchorBaseY(rel: string | null, anchor: HTMLElement, sheet: DOMRect, padTop: number): number | null {
+	switch (rel) {
+		case "page": return sheet.top;
+		case "margin": return sheet.top + padTop;
+		case "paragraph": {
+			const p = anchor.closest("p");
+			return p ? p.getBoundingClientRect().top : null;
+		}
+		default: return null;
+	}
+}
+
 export function positionAnchoredFrames(container: HTMLElement, settings: WmlSettings) {
 	const mirror = !!(settings && settings.mirrorMargins);
 	const sheets = container.querySelectorAll<HTMLElement>("section.docx");
@@ -877,21 +905,37 @@ export function positionAnchoredFrames(container: HTMLElement, settings: WmlSett
 			ps[j].style.right = toLeft ? "auto" : (inset + "px");
 		}
 
-		// Page-relative anchored drawings (positionH relativeFrom="page", e.g. a
-		// page watermark anchored in the footer) must sit at their offset from
-		// the PAGE edge, but are laid out at the inline text position - inset by
-		// the margin, and not necessarily at the paragraph start. Correct each by
-		// its measured page-x so the final left edge equals the offset. Measuring
-		// (rather than subtracting the left padding) is robust to mirrored even
-		// pages, where the anchor's static position is not the left margin.
-		const sectLeft = sheets[i].getBoundingClientRect().left;
-		const draws = sheets[i].querySelectorAll<HTMLElement>('[data-docx-anchor-h="page"]');
+		// An anchored drawing (wrapNone) carries an offset measured from the base
+		// its positionH/positionV names - the page, the margins, the anchoring
+		// paragraph - but is laid out at the inline position of its run, which is
+		// wherever the text before it ended. A page watermark anchored in the
+		// footer starts inset by the margin; a cover picture anchored in a centred
+		// paragraph starts mid-page. Move each to base + offset, measured: that is
+		// robust on mirrored even pages, where the anchor's static position is not
+		// the left margin.
+		const sheetRect = sheets[i].getBoundingClientRect();
+		const padT = parseFloat(sectCs.paddingTop) || 0;
+		const draws = sheets[i].querySelectorAll<HTMLElement>("[data-docx-anchor-h],[data-docx-anchor-v]");
 		for (let k = 0; k < draws.length; k++) {
 			const d = draws[k];
-			const off = parseFloat(getComputedStyle(d).left) || 0;   // offset from the page edge
-			const pageX = d.getBoundingClientRect().left - sectLeft;  // current left edge vs page (= static + off)
-			d.style.left = (2 * off - pageX) + "px";                  // => final left edge === off
-			d.removeAttribute("data-docx-anchor-h"); // idempotent: don't correct twice
+			const cs = getComputedStyle(d);
+			const rect = d.getBoundingClientRect();
+
+			const baseX = anchorBaseX(d.getAttribute("data-docx-anchor-h"), sheetRect, padL, padR);
+			if (baseX !== null) {
+				const off = parseFloat(cs.left) || 0;
+				d.style.left = (off + (baseX + off - rect.left)) + "px";
+			}
+
+			const baseY = anchorBaseY(d.getAttribute("data-docx-anchor-v"), d, sheetRect, padT);
+			if (baseY !== null) {
+				const off = parseFloat(cs.top) || 0;
+				d.style.top = (off + (baseY + off - rect.top)) + "px";
+			}
+
+			// idempotent: a re-render must not correct an already corrected anchor
+			d.removeAttribute("data-docx-anchor-h");
+			d.removeAttribute("data-docx-anchor-v");
 		}
 	}
 }
