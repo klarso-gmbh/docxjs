@@ -1369,8 +1369,31 @@ section.${c}>footer { z-index: 0; }
 		return result;
 	}
 
+	// UAX#14 LB21 ("× HY") forbids a break BEFORE a hyphen, so a run of hyphens
+	// is unbreakable and carries the character in front of it - which is what
+	// LibreOffice's line breaker (its own ICU tailoring, i18npool line.txt) and
+	// Word do. Blink offers a break after every hyphen instead, so a row of
+	// dashes - a filler our documents use a lot - gets torn apart and every line
+	// after it lands somewhere else than in the printed document. Keep those runs
+	// together; the text itself is untouched, so copy, search and the CID
+	// anchors are unaffected.
+	static readonly HYPHEN_RUN = /.?[-‐]{2,}/g;
+
 	renderText(elem: WmlText) {
-		return this.h(elem.text);
+		const text = elem.text;
+		if (!text || !/[-‐]{2,}/.test(text))
+			return this.h(text);
+
+		const parts: any[] = [];
+		let last = 0;
+		HtmlRenderer.HYPHEN_RUN.lastIndex = 0;
+		for (let m: RegExpExecArray; (m = HtmlRenderer.HYPHEN_RUN.exec(text));) {
+			if (m.index > last) parts.push(this.h(text.substring(last, m.index)));
+			parts.push(this.h({ tagName: "span", style: { "white-space": "nowrap" }, children: [this.h(m[0])] }));
+			last = m.index + m[0].length;
+		}
+		if (last < text.length) parts.push(this.h(text.substring(last)));
+		return parts;
 	}
 
 	renderDeletedText(elem: WmlText) {
