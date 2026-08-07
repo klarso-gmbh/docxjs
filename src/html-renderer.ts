@@ -805,7 +805,7 @@ section.${c}>article { margin-bottom: auto; z-index: 1; }
 section.${c}>header { z-index: 0; }
 section.${c}>footer { z-index: 0; }
 .${c} table { border-collapse: collapse; }
-.${c} table td, .${c} table th { vertical-align: top; }
+.${c} table td, .${c} table th { vertical-align: top; padding: 0 5.4pt; }
 .${c} p { margin: 0pt; min-height: 1em; }
 .${c} span { white-space: pre-wrap; overflow-wrap: break-word; }
 .${c} a { color: inherit; text-decoration: inherit; }
