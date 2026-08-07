@@ -58,6 +58,10 @@ export class HtmlRenderer {
 	currentVerticalMerge: CellVerticalMergeType = null;
 	tableCellPositions: CellPos[] = [];
 	currentCellPosition: CellPos = null;
+	// w:tblCellMar of the table being rendered - it is the default margin of its
+	// CELLS, so it has to travel down to them (see renderTable)
+	tableCellMargins: Record<string, string>[] = [];
+	currentCellMargins: Record<string, string> = null;
 
 	footnoteMap: Record<string, WmlFootnote> = {};
 	endnoteMap: Record<string, WmlFootnote> = {};
@@ -473,6 +477,8 @@ export class HtmlRenderer {
 		this.currentVerticalMerge = null;
 		this.tableCellPositions = [];
 		this.currentCellPosition = null;
+		this.tableCellMargins = [];
+		this.currentCellMargins = null;
 		this.tasks = [];
 		this.postRenderTasks = [];
 
@@ -805,7 +811,8 @@ section.${c}>article { margin-bottom: auto; z-index: 1; }
 section.${c}>header { z-index: 0; }
 section.${c}>footer { z-index: 0; }
 .${c} table { border-collapse: collapse; }
-.${c} table td, .${c} table th { vertical-align: top; padding: 0 5.4pt; }
+.${c} table td, .${c} table th { vertical-align: top; }
+.${c} td, .${c} th { padding: 0 5.4pt; }
 .${c} p { margin: 0pt; min-height: 1em; }
 .${c} span { white-space: pre-wrap; overflow-wrap: break-word; }
 .${c} a { color: inherit; text-decoration: inherit; }
@@ -1533,8 +1540,15 @@ section.${c}>footer { z-index: 0; }
 	renderTable(elem: WmlTable) {
 		this.tableCellPositions.push(this.currentCellPosition);
 		this.tableVerticalMerges.push(this.currentVerticalMerge);
+		this.tableCellMargins.push(this.currentCellMargins);
 		this.currentVerticalMerge = {};
 		this.currentCellPosition = { col: 0, row: 0 };
+		// w:tblCellMar sets the default margin of the table's CELLS, but on the
+		// table itself it is parsed as padding on the table element, where CSS
+		// never applies it to them. Take it off the table and hand it to
+		// renderTableCell. (From a table STYLE it already arrives as a td rule -
+		// the style parser files tblPr under the "td" target.)
+		this.currentCellMargins = this.takeCellMargins(elem.cssStyle);
 
 		const children = [];
 
@@ -1545,6 +1559,7 @@ section.${c}>footer { z-index: 0; }
 
 		this.currentVerticalMerge = this.tableVerticalMerges.pop();
 		this.currentCellPosition = this.tableCellPositions.pop();
+		this.currentCellMargins = this.tableCellMargins.pop();
 		const result = this.toHTML(elem, ns.html, "table", children) as HTMLElement;
 
 		if (this.options.measuredPagination && (elem as any).$mi != null)
@@ -1592,7 +1607,26 @@ section.${c}>footer { z-index: 0; }
 		return this.h({ tagName: "td", colSpan, style: { border: "none" } });
 	}
 
+	/* Moves the padding-* entries out of a table's own properties - that is where
+	   its w:tblCellMar lands. Returns null when there are none. */
+	takeCellMargins(values: Record<string, string>): Record<string, string> {
+		if (!values) return null;
+		let out: Record<string, string> = null;
+		for (const side of ["top", "right", "bottom", "left"]) {
+			const key = "padding-" + side;
+			if (values[key] == null) continue;
+			(out ??= {})[key] = values[key];
+			delete values[key];
+		}
+		return out;
+	}
+
 	renderTableCell(elem: WmlTableCell) {
+		// the table's w:tblCellMar is the default for its cells; the cell's own
+		// w:tcMar (parsed into its cssStyle) wins
+		if (this.currentCellMargins)
+			elem.cssStyle = { ...this.currentCellMargins, ...(elem.cssStyle ?? {}) };
+
 		let result = this.toHTML(elem, ns.html, "td");
 
 		const key = this.currentCellPosition.col;
