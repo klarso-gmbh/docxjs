@@ -558,6 +558,21 @@ function miOf(el: Element): number | null {
 	return v == null ? null : parseInt(v, 10);
 }
 
+/* Word keeps a w:keepNext paragraph on the page where the block behind it
+   starts. So when a block moves to the next page as a whole, the chain of
+   keepNext paragraphs in front of it moves along - a heading must not be left
+   behind at the bottom of the page. A chain that reaches back to the top of the
+   page cannot be honoured (the page would come out empty); Word gives up on it
+   too. A block that is only SPLIT stays: its first line is still on this page,
+   which is what the keep asks for. */
+function keepNextStart(art: HTMLElement, el: Element): Element {
+	let start = el;
+	while (start.previousElementSibling
+		&& (start.previousElementSibling as HTMLElement).getAttribute?.("data-docx-keep-next") === "1")
+		start = start.previousElementSibling;
+	return start === art.firstElementChild ? el : start;
+}
+
 /* Break after an element that can't be split and doesn't fit anywhere. */
 function breakAfter(section: HTMLElement, el: Element, ctx: PaginateCtx): HTMLElement | null {
 	const next = el.nextElementSibling;
@@ -597,10 +612,17 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 		if (splitIdx > clones && splitIdx <= headerRowCount(table)) splitIdx = clones; // never split off a bare header
 		if (splitIdx <= clones) {
 			if (!isFirst) {
-				// starts too low: move the whole table (and the rest) over
-				if (tmi != null) ctx.record(rowbase > 0 ? { kind: "tableRow", mi: tmi, row: rowbase } : { kind: "before", mi: tmi });
+				// starts too low: move the whole table (and the rest) over, with
+				// whatever wants to be kept with it
+				const from = rowbase > 0 ? crossing : keepNextStart(art, crossing);
+				if (from !== crossing) {
+					const fmi = miOf(from);
+					if (fmi != null) ctx.record({ kind: "before", mi: fmi });
+				} else if (tmi != null) {
+					ctx.record(rowbase > 0 ? { kind: "tableRow", mi: tmi, row: rowbase } : { kind: "before", mi: tmi });
+				}
 				const sheetA = newSheet(section);
-				moveFollowing(contentRoot(sheetA), crossing);
+				moveFollowing(contentRoot(sheetA), from);
 				return sheetA;
 			}
 			if (rows.length <= clones + 1) return breakAfter(section, crossing, ctx); // single monster row
@@ -618,10 +640,11 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 	const split = trySplitParagraph(section, crossing, limit, isFirst, ctx);
 	if (split) return split;
 	if (isFirst) return breakAfter(section, crossing, ctx); // unsplittable block taller than a page
-	const cmi = miOf(crossing);
+	const from = keepNextStart(art, crossing);
+	const cmi = miOf(from);
 	if (cmi != null) ctx.record({ kind: "before", mi: cmi });
 	const sheet = newSheet(section);
-	moveFollowing(contentRoot(sheet), crossing);
+	moveFollowing(contentRoot(sheet), from);
 	return sheet;
 }
 

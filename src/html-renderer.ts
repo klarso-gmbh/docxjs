@@ -1249,6 +1249,12 @@ section.${c}>footer { z-index: 0; }
 		if (this.options.measuredPagination && (elem as any).$mi != null)
 			result.setAttribute("data-docx-mi", String((elem as any).$mi));
 
+		// w:keepNext - the paginator keeps this paragraph on the page the next
+		// block starts on. Resolved here because the style chain lives here: in
+		// practice it is a heading style that carries it, not the paragraph.
+		if (this.options.measuredPagination && (elem.keepNext ?? style?.paragraphProps?.keepNext))
+			result.setAttribute("data-docx-keep-next", "1");
+
 		return result;
 	}
 
