@@ -330,6 +330,22 @@ function sheetGeometry(section: HTMLElement) {
 	return { target, padBottom: px(cs.paddingBottom) };
 }
 
+/* The deepest CONTENT bottom of a block. Below the last line of a table cell
+   sits space that is not content - the cell's bottom margin and the space after
+   its last paragraph - and neither Word nor LibreOffice makes that space fit
+   before it turns the page: a row whose text ends on the sheet stays on it.
+   Only the table structure is walked; inside a paragraph the box bottom IS the
+   content bottom (it carries the line's leading, which is content). */
+const STRUCTURAL: Record<string, 1> = { TABLE: 1, TBODY: 1, THEAD: 1, TFOOT: 1, TR: 1, TD: 1, TH: 1 };
+
+function contentBottom(el: Element): number {
+	if (!STRUCTURAL[el.tagName]) return el.getBoundingClientRect().bottom;
+	let bottom = -Infinity;
+	for (let i = 0; i < el.children.length; i++)
+		bottom = Math.max(bottom, contentBottom(el.children[i]));
+	return bottom === -Infinity ? el.getBoundingClientRect().bottom : bottom;
+}
+
 function contentRoot(section: HTMLElement): HTMLElement {
 	for (let i = 0; i < section.children.length; i++)
 		if (section.children[i].tagName === "ARTICLE") return section.children[i] as HTMLElement;
@@ -723,7 +739,7 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 	let crossing: HTMLElement = null;
 	for (let i = 0; i < art.children.length; i++) {
 		const el = art.children[i] as HTMLElement;
-		if (el.getBoundingClientRect().bottom <= limit + EPS) continue;
+		if (contentBottom(el) <= limit + EPS) continue;
 		crossing = el;
 		break;
 	}
@@ -741,7 +757,7 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 		const modelRow = (domIdx: number) => rowbase + domIdx - clones;
 		let splitIdx = -1;
 		for (let j = 0; j < rows.length; j++) {
-			if (rows[j].getBoundingClientRect().bottom > limit + EPS) { splitIdx = j; break; }
+			if (contentBottom(rows[j]) > limit + EPS) { splitIdx = j; break; }
 		}
 		if (splitIdx < 0) splitIdx = rows.length;
 
