@@ -282,6 +282,17 @@ export function applyMeasuredGeometry(
 			it.p.style.fontSize = it.size + "px";
 			it.p.style.fontFamily = it.family;
 		}
+		// An empty paragraph is a full line tall in Word and in LibreOffice - it
+		// is a line, it just has nothing on it (measured: the gap across one is
+		// line + space + line + space, not line + space). Without inline content
+		// a browser gives it no line box and falls back to the stock
+		// `min-height: 1em`, a font size rather than a line height. These
+		// documents are full of them - the exporter writes one after every table.
+		const line = it.p.style.lineHeight || getComputedStyle(it.p).lineHeight;
+		if (line && line !== "normal") {
+			css["min-height"] = line;
+			it.p.style.minHeight = line;
+		}
 		if (it.spaceKey && cache[it.spaceKey] !== undefined) {
 			const ws = (shrink * cache[it.spaceKey] * it.size).toFixed(2) + "px";
 			css["word-spacing"] = ws;
@@ -644,7 +655,10 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 
 	let crossing: HTMLElement = null;
 	for (let i = 0; i < art.children.length; i++) {
-		if ((art.children[i] as HTMLElement).getBoundingClientRect().bottom > limit + EPS) { crossing = art.children[i] as HTMLElement; break; }
+		const el = art.children[i] as HTMLElement;
+		if (el.getBoundingClientRect().bottom <= limit + EPS) continue;
+		crossing = el;
+		break;
 	}
 	if (!crossing) return null;
 	const isFirst = (crossing === art.firstElementChild);

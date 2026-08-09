@@ -1054,6 +1054,16 @@ section.${c}>footer { z-index: 0; }
 					selector = `.${this.className} ${style.target}, ` + selector;
 
 				styleText += this.styleToString(selector, subStyle.values);
+
+				// The default RUN properties are what a PARAGRAPH MARK is formatted
+				// with too, and a paragraph holding nothing but its mark is still a
+				// line tall. A browser has no mark, so an empty paragraph would take
+				// its size from the user agent instead of from the document. Put the
+				// defaults on the wrapper, where anything without a run of its own
+				// inherits them. (docDefaults is the style with a null id -
+				// isDefault is not set on it.)
+				if (style.id == null && subStyle.target == "span")
+					styleText += this.styleToString(`.${this.className}`, subStyle.values);
 			}
 		}
 
