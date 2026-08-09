@@ -543,8 +543,11 @@ export class HtmlRenderer {
 					el.style.marginBottom = `calc(${props.pageMargins.footer} - ${props.pageMargins.bottom})`;
 					el.style.minHeight = `calc(${props.pageMargins.bottom} - ${props.pageMargins.footer})`;
 					// footers grow upward from the footer line: anchor the
-					// content at the bottom of the reserved band, like Word
-					el.style.display = "flex";
+					// content at the bottom of the reserved band, like Word.
+					// A variant this page does not use stays hidden - showing it
+					// again would stack two footers and, for a consumer that
+					// paginates by height, eat the space of the taller one.
+					if (el.style.display !== "none") el.style.display = "flex";
 					el.style.flexDirection = "column";
 					el.style.justifyContent = "flex-end";
 				}
