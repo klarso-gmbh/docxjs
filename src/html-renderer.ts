@@ -599,8 +599,24 @@ export class HtmlRenderer {
 		const rows = table.children ?? [];
 		const breakRows: number[] = [];
 		for (let ri = 0; ri < rows.length; ri++)
-			if (this.rowHasPageBreak(rows[ri])) breakRows.push(ri);
+			if (this.rowHasPageBreak(rows[ri]) || (rows[ri] as any).$splitKeep) breakRows.push(ri);
 		if (!breakRows.length) return [table];
+
+		// A row the measured pass SPLIT sits on both pages: the blocks that fit
+		// close the page it started on, the rest open the next one. $splitKeep[c]
+		// is how many blocks of cell c stayed.
+		const partRow = (tr: OpenXmlElement, head: boolean): OpenXmlElement => {
+			const keep = (tr as any).$splitKeep as number[];
+			return {
+				...tr,
+				children: (tr.children ?? []).map((cell, c) => ({
+					...cell,
+					children: head
+						? (cell.children ?? []).slice(0, keep[c] ?? 0)
+						: (cell.children ?? []).slice(keep[c] ?? 0)
+				}))
+			} as OpenXmlElement;
+		};
 
 		// Word and LibreOffice repeat the w:tblHeader rows on every page the table
 		// continues on; the measured pass laid the table out that way, so the
@@ -618,6 +634,13 @@ export class HtmlRenderer {
 		for (let bi = 0; bi < bounds.length - 1; bi++) {
 			let seg = rows.slice(bounds[bi], bounds[bi + 1]);
 			if (!seg.length) continue;
+			// a split row opens this segment with its remainder ...
+			if (bi > 0 && (rows[bounds[bi]] as any).$splitKeep)
+				seg = [partRow(rows[bounds[bi]], false), ...seg.slice(1)];
+			// ... and closes it with the part that still fitted
+			const endRow = rows[bounds[bi + 1]];
+			if (endRow && (endRow as any).$splitKeep)
+				seg = seg.concat([partRow(endRow, true)]);
 			if (bi > 0 && headerRows.length && bounds[bi] >= headerRows.length)
 				seg = headerRows.concat(seg);
 			// Every segment is a CLONE - assigning the first one back to

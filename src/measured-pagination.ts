@@ -53,6 +53,7 @@ function px(v: string): number {
 type BreakDesc =
 	| { kind: "before"; mi: number }                     // page break before a block
 	| { kind: "tableRow"; mi: number; row: number }      // split a table before an (absolute) row
+	| { kind: "rowSplit"; mi: number; row: number; keep: number[] } // split a row: keep[c] blocks of cell c stay
 	| { kind: "paraChar"; mi: number; offset: number };  // split a paragraph at a character offset
 
 interface PaginateCtx {
@@ -380,13 +381,63 @@ function headerRowCount(table: HTMLTableElement): number {
 	return n;
 }
 
+/* Rows at the top of a continuation table that carry no model row of their own:
+   the repeated header clones, and the remainder of a row that was split across
+   the boundary. The break descriptors count real rows only. */
+function leadingNonModelRows(table: HTMLTableElement): number {
+	let n = 0;
+	while (n < table.rows.length
+		&& (table.rows[n].hasAttribute("data-docx-hdrclone") || table.rows[n].hasAttribute("data-docx-rowtail"))) n++;
+	return n;
+}
+
 function headerCloneCount(table: HTMLTableElement): number {
 	let n = 0;
 	while (n < table.rows.length && table.rows[n].hasAttribute("data-docx-hdrclone")) n++;
 	return n;
 }
 
-function splitTableAt(table: HTMLTableElement, splitIdx: number): HTMLTableElement {
+/* How much of a row still fits: keep[c] = the number of block children cell c
+   keeps on this page. Null when the row cannot or should not be split - it is a
+   repeated header, it is vertically merged, it starts too low to leave anything
+   behind, or everything fits anyway. */
+function rowSplitKeep(row: HTMLTableRowElement, limit: number): number[] | null {
+	if (row.hasAttribute("data-docx-hdrclone")) return null;
+	if (row.hasAttribute("data-docx-rowtail")) return null;   // already a remainder
+	if (row.hasAttribute("data-docx-thead")) return null;     // a header stays whole
+	const keep: number[] = [];
+	let kept = false, moved = false;
+	for (const cell of Array.from(row.cells)) {
+		if (cell.rowSpan > 1) return null;                    // merged down: leave it alone
+		let n = 0;
+		for (const child of Array.from(cell.children)) {
+			if ((child as HTMLElement).getBoundingClientRect().bottom > limit + EPS) break;
+			n++;
+		}
+		keep.push(n);
+		if (n > 0) kept = true;
+		if (n < cell.children.length) moved = true;
+	}
+	return (kept && moved) ? keep : null;
+}
+
+/* The remainder of a split row, ready to head the continuation table: the same
+   row and cell boxes, holding the blocks that did not fit. */
+function rowTail(row: HTMLTableRowElement, keep: number[]): HTMLTableRowElement {
+	const tail = row.cloneNode(false) as HTMLTableRowElement;
+	tail.setAttribute("data-docx-rowtail", "1");
+	tail.removeAttribute("data-docx-mi");
+	for (let c = 0; c < row.cells.length; c++) {
+		const cell = row.cells[c];
+		const tailCell = cell.cloneNode(false) as HTMLElement;
+		const n = keep[c] ?? 0;
+		while (cell.children.length > n) tailCell.appendChild(cell.children[n]);
+		tail.appendChild(tailCell);
+	}
+	return tail;
+}
+
+function splitTableAt(table: HTMLTableElement, splitIdx: number, tail?: HTMLTableRowElement): HTMLTableElement {
 	const cont = table.cloneNode(false) as HTMLTableElement;
 	for (let i = 0; i < table.children.length; i++) {
 		if (table.children[i].tagName === "COLGROUP") { cont.appendChild(table.children[i].cloneNode(true)); break; }
@@ -400,9 +451,12 @@ function splitTableAt(table: HTMLTableElement, splitIdx: number): HTMLTableEleme
 		clone.removeAttribute("data-docx-mi");
 		body.appendChild(clone);
 	}
+	// the remainder of a row split across the boundary heads the continuation,
+	// behind the repeated headers
+	if (tail) body.appendChild(tail);
 	while (table.rows.length > splitIdx) body.appendChild(table.rows[splitIdx]); // .rows is live
 	const base = parseInt(table.getAttribute("data-docx-rowbase") || "0", 10) || 0;
-	cont.setAttribute("data-docx-rowbase", String(base + splitIdx - headerCloneCount(table)));
+	cont.setAttribute("data-docx-rowbase", String(base + splitIdx - leadingNonModelRows(table)));
 	return cont;
 }
 
@@ -602,7 +656,7 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 		const tmi = miOf(table);
 		// repeated header rows are layout, not content: they carry no model row,
 		// and a split may not land inside them
-		const clones = headerCloneCount(table);
+		const clones = leadingNonModelRows(table);
 		const modelRow = (domIdx: number) => rowbase + domIdx - clones;
 		let splitIdx = -1;
 		for (let j = 0; j < rows.length; j++) {
@@ -629,6 +683,23 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 			splitIdx = clones + 1;
 		}
 		if (splitIdx >= rows.length && rows.length > 0 && !crossing.nextElementSibling) return null;
+
+		// A row taller than what is left of the page is SPLIT, not moved: OOXML
+		// rows split unless they say w:cantSplit, and Word and LibreOffice both
+		// take as much of the row as fits. Moving it whole leaves the page short
+		// by everything that row would have filled - on a table-heavy document
+		// that is most of a page.
+		const keep = splitIdx < rows.length ? rowSplitKeep(rows[splitIdx], limit) : null;
+		if (keep) {
+			if (tmi != null) ctx.record({ kind: "rowSplit", mi: tmi, row: modelRow(splitIdx), keep });
+			const tail = rowTail(rows[splitIdx], keep);
+			const sheetR = newSheet(section);
+			const contR = contentRoot(sheetR);
+			contR.appendChild(splitTableAt(table, splitIdx + 1, tail));
+			moveFollowing(contR, crossing.nextElementSibling);
+			return sheetR;
+		}
+
 		if (tmi != null && splitIdx < rows.length) ctx.record({ kind: "tableRow", mi: tmi, row: modelRow(splitIdx) });
 		const sheetB = newSheet(section);
 		const contArt = contentRoot(sheetB);
@@ -775,7 +846,7 @@ export function applyBreaksToModel(breaks: BreakDesc[], miMap: Map<number, OpenX
 	const seen = new Set<string>();
 	for (const b of breaks) {
 		if (b.kind === "paraChar") { (paraOffsets[b.mi] ??= []).push(b.offset); continue; }
-		const key = b.kind + ":" + b.mi + ":" + (b.kind === "tableRow" ? b.row : "");
+		const key = b.kind + ":" + b.mi + ":" + (b.kind === "tableRow" || b.kind === "rowSplit" ? b.row : "");
 		if (seen.has(key)) continue;
 		seen.add(key);
 		if (b.kind === "before") {
@@ -783,6 +854,11 @@ export function applyBreaksToModel(breaks: BreakDesc[], miMap: Map<number, OpenX
 			if (el) (el as any).$pageBreakBefore = true;
 		} else if (b.kind === "tableRow") {
 			markTableRowBreak(miMap.get(b.mi), b.row);
+		} else if (b.kind === "rowSplit") {
+			// the row itself is the boundary: it appears on both pages, cut at
+			// the block counts the measuring pass found (see splitTableByRowBreaks)
+			const tr = miMap.get(b.mi)?.children?.[b.row];
+			if (tr) (tr as any).$splitKeep = b.keep;
 		}
 	}
 	for (const miStr in paraOffsets) {
@@ -887,6 +963,15 @@ export function resolveBreaksToDocument(
 			const table = miMap.get(b.mi);
 			const row = table?.children?.[b.row];
 			para = firstParagraphIn(row);
+		} else if (b.kind === "rowSplit") {
+			// the page turns in front of the first block the row could not keep
+			const row = miMap.get(b.mi)?.children?.[b.row];
+			for (let c = 0; row?.children && c < row.children.length && !para; c++) {
+				for (const blk of (row.children[c].children ?? []).slice(b.keep[c] ?? 0)) {
+					para = blk.type == DomType.Paragraph ? blk : firstParagraphIn(blk);
+					if (para) break;
+				}
+			}
 		} else { // paraChar
 			para = miMap.get(b.mi) ?? null;
 			if (para && para.type == DomType.Paragraph)
