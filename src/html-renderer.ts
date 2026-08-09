@@ -592,6 +592,30 @@ export class HtmlRenderer {
 		return row.children?.some(scan) ?? false;
 	}
 
+	/* Splits a paragraph at the lastRenderedPageBreak marker it carries into
+	   [head, tail] clones - the marker itself belongs to neither. Null when it
+	   carries none. */
+	splitParagraphAtBreak(p: OpenXmlElement): [OpenXmlElement, OpenXmlElement] | null {
+		const children = p?.children ?? [];
+		let rBreakIndex = -1;
+		const pBreakIndex = children.findIndex(r => {
+			rBreakIndex = r.children?.findIndex(this.isPageBreakElement.bind(this)) ?? -1;
+			return rBreakIndex != -1;
+		});
+		if (pBreakIndex < 0) return null;
+		const breakRun = children[pBreakIndex];
+		const head = { ...p, children: children.slice(0, pBreakIndex) } as OpenXmlElement;
+		// a continuation must not repeat its number nor count again
+		const tail = { ...p, numbering: null, $splitCont: true, children: children.slice(pBreakIndex + 1) } as OpenXmlElement;
+		const runChildren = breakRun.children ?? [];
+		if (rBreakIndex > 0)
+			head.children = head.children.concat([{ ...breakRun, children: runChildren.slice(0, rBreakIndex) }]);
+		if (rBreakIndex < runChildren.length - 1)
+			tail.children = ([{ ...breakRun, children: runChildren.slice(rBreakIndex + 1) }] as OpenXmlElement[])
+				.concat(tail.children);
+		return [head, tail];
+	}
+
 	// splits a table into row segments at cell-internal page breaks; every
 	// segment is a clone keeping the columns (widths). Returns [table] when there
 	// is nothing to split.
@@ -607,14 +631,22 @@ export class HtmlRenderer {
 		// is how many blocks of cell c stayed.
 		const partRow = (tr: OpenXmlElement, head: boolean): OpenXmlElement => {
 			const keep = (tr as any).$splitKeep as number[];
+			const cuts = ((tr as any).$splitCut ?? []) as (number | null)[];
 			return {
 				...tr,
-				children: (tr.children ?? []).map((cell, c) => ({
-					...cell,
-					children: head
-						? (cell.children ?? []).slice(0, keep[c] ?? 0)
-						: (cell.children ?? []).slice(keep[c] ?? 0)
-				}))
+				children: (tr.children ?? []).map((cell, c) => {
+					const n = keep[c] ?? 0;
+					const blocks = cell.children ?? [];
+					// the block that straddles the boundary carries a break marker
+					// at the character the measuring pass cut it at
+					const cut = cuts[c] != null ? this.splitParagraphAtBreak(blocks[n]) : null;
+					return {
+						...cell,
+						children: head
+							? blocks.slice(0, n).concat(cut ? [cut[0]] : [])
+							: (cut ? [cut[1]] : []).concat(blocks.slice(cut ? n + 1 : n))
+					};
+				})
 			} as OpenXmlElement;
 		};
 

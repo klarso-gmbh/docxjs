@@ -53,7 +53,7 @@ function px(v: string): number {
 type BreakDesc =
 	| { kind: "before"; mi: number }                     // page break before a block
 	| { kind: "tableRow"; mi: number; row: number }      // split a table before an (absolute) row
-	| { kind: "rowSplit"; mi: number; row: number; keep: number[] } // split a row: keep[c] blocks of cell c stay
+	| { kind: "rowSplit"; mi: number; row: number; keep: number[]; cuts: (number | null)[] } // split a row: cell c keeps keep[c] blocks, and cuts[c] characters of the next
 	| { kind: "paraChar"; mi: number; offset: number };  // split a paragraph at a character offset
 
 interface PaginateCtx {
@@ -427,6 +427,11 @@ function rowSplitKeep(row: HTMLTableRowElement, limit: number): number[] | null 
 		}
 		keep.push(n);
 		if (n > 0) kept = true;
+		// the block that straddles the limit may still give up its first lines -
+		// Word and LibreOffice both turn the page in the middle of a cell
+		// paragraph (verified on both PDFs of the reference document)
+		if (!kept && n < cell.children.length
+			&& cutParagraphAt(cell.children[n] as HTMLElement, limit, false, false)) kept = true;
 		if (n < cell.children.length) moved = true;
 	}
 	return (kept && moved) ? keep : null;
@@ -434,18 +439,29 @@ function rowSplitKeep(row: HTMLTableRowElement, limit: number): number[] | null 
 
 /* The remainder of a split row, ready to head the continuation table: the same
    row and cell boxes, holding the blocks that did not fit. */
-function rowTail(row: HTMLTableRowElement, keep: number[]): HTMLTableRowElement {
+function rowTail(row: HTMLTableRowElement, keep: number[], limit: number): { tail: HTMLTableRowElement; cuts: (number | null)[] } {
 	const tail = row.cloneNode(false) as HTMLTableRowElement;
 	tail.setAttribute("data-docx-rowtail", "1");
 	tail.removeAttribute("data-docx-mi");
+	const cuts: (number | null)[] = [];
 	for (let c = 0; c < row.cells.length; c++) {
 		const cell = row.cells[c];
 		const tailCell = cell.cloneNode(false) as HTMLElement;
 		const n = keep[c] ?? 0;
-		while (cell.children.length > n) tailCell.appendChild(cell.children[n]);
+		// the block straddling the limit keeps the lines that fit and hands the
+		// rest to the continuation
+		let cut: number | null = null;
+		const straddling = cell.children[n] as HTMLElement;
+		if (straddling) {
+			const r = cutParagraphAt(straddling, limit, false, true);
+			if (r) { cut = r.abs; tailCell.appendChild(r.cont); }
+		}
+		cuts.push(cut);
+		const from = n + (cut != null ? 1 : 0);
+		while (cell.children.length > from) tailCell.appendChild(cell.children[from]);
 		tail.appendChild(tailCell);
 	}
-	return tail;
+	return { tail, cuts };
 }
 
 function splitTableAt(table: HTMLTableElement, splitIdx: number, tail?: HTMLTableRowElement): HTMLTableElement {
@@ -564,6 +580,57 @@ function lineStartPosition(atoms: (Text | Element)[], lineTop: number): LinePos 
    widow/orphan minimums. Records the model break point (paragraph mi + absolute
    character offset) and mirrors the DOM split so subsequent measurement of the
    continuation is correct. Returns the continuation sheet or null. */
+/* Where a paragraph crosses the limit, in characters from its start, and - when
+   `extract` - the continuation element holding everything from there on (taken
+   out of `p`). Null when it cannot be cut there: too few lines, widow/orphan in
+   the way, or the cut would leave nothing behind. */
+function cutParagraphAt(p: HTMLElement, limit: number, mustSplit: boolean, extract: boolean): { abs: number; cont: HTMLElement | null } | null {
+	if (p.tagName !== "P") return null;
+	if (!mustSplit && p.getAttribute("data-docx-keep-lines") === "1") return null;
+	try {
+		const atoms = atomsOf(p);
+		if (!atoms.length) return null;
+		const lines = lineBoxesOf(atoms);
+		if (lines.length < 2) return null;
+		const relax = mustSplit || p.getAttribute("data-docx-widow-control") === "0";
+		const minKeep = relax ? 1 : MIN_LINES_KEEP;
+		const minMove = relax ? 1 : MIN_LINES_MOVE;
+		let fit = -1;
+		for (let i = 0; i < lines.length; i++) { if (lines[i].bottom <= limit + EPS) fit = i; else break; }
+		if (lines.length < minKeep + minMove) return null;
+		if (fit + 1 < minKeep) return null;
+		if (lines.length - (fit + 1) < minMove) { fit = lines.length - minMove - 1; if (fit + 1 < minKeep) return null; }
+		if (fit >= lines.length - 1) return null;
+		const pos = lineStartPosition(atoms, lines[fit + 1].top);
+		if (!pos || (pos.atomIndex === 0 && (pos.before || pos.offset === 0))) return null;
+
+		// absolute break offset within the paragraph: text counts by character
+		// (INCLUDING soft hyphens - hyphenation is in the model text too, so the
+		// measured DOM offset maps directly), each image/atomic box counts as 1
+		// slot (so a break between two stacked images maps to the model too).
+		let abs = pos.before ? 0 : pos.offset;
+		for (let n = 0; n < pos.atomIndex; n++)
+			abs += isImageAtom(atoms[n]) ? 1 : (atoms[n] as Text).nodeValue.length;
+		const base = parseInt(p.getAttribute("data-docx-split-offset") || "0", 10) || 0;
+		if (!extract) return { abs: base + abs, cont: null };
+
+		const range = document.createRange();
+		range.selectNodeContents(p);
+		if (pos.before) range.setStartBefore(pos.before);
+		else range.setStart(pos.node, pos.offset);
+
+		const cont = p.cloneNode(false) as HTMLElement; // same classes/styles
+		// numbering renders via ::before + CSS counters; a continuation must not
+		// repeat the number nor count again
+		cont.className = Array.prototype.filter.call(cont.classList, (c: string) => c.indexOf("-num-") < 0).join(" ");
+		cont.appendChild(range.extractContents());
+		cont.setAttribute("data-docx-split-offset", String(base + abs));
+		return { abs: base + abs, cont };
+	} catch (e) {
+		return null;
+	}
+}
+
 function trySplitParagraph(section: HTMLElement, p: HTMLElement, limit: number, mustSplit: boolean, ctx: PaginateCtx): HTMLElement | null {
 	if (p.tagName !== "P") return null;
 	if (!mustSplit && p.getAttribute("data-docx-keep-lines") === "1") return null;
@@ -685,8 +752,8 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 		// behind the header is exactly what stops it being alone.
 		const keep = splitIdx < rows.length ? rowSplitKeep(rows[splitIdx], limit) : null;
 		if (keep) {
-			if (tmi != null) ctx.record({ kind: "rowSplit", mi: tmi, row: modelRow(splitIdx), keep });
-			const tail = rowTail(rows[splitIdx], keep);
+			const { tail, cuts } = rowTail(rows[splitIdx], keep, limit);
+			if (tmi != null) ctx.record({ kind: "rowSplit", mi: tmi, row: modelRow(splitIdx), keep, cuts });
 			const sheetR = newSheet(section);
 			const contR = contentRoot(sheetR);
 			contR.appendChild(splitTableAt(table, splitIdx + 1, tail));
@@ -873,7 +940,18 @@ export function applyBreaksToModel(breaks: BreakDesc[], miMap: Map<number, OpenX
 			// the row itself is the boundary: it appears on both pages, cut at
 			// the block counts the measuring pass found (see splitTableByRowBreaks)
 			const tr = miMap.get(b.mi)?.children?.[b.row];
-			if (tr) (tr as any).$splitKeep = b.keep;
+			if (tr) {
+				(tr as any).$splitKeep = b.keep;
+				(tr as any).$splitCut = b.cuts;
+				// a cell whose straddling paragraph was cut mid-way gets the usual
+				// break marker at that character, so the second pass can split it
+				for (let c = 0; c < (b.cuts?.length ?? 0); c++) {
+					const off = b.cuts[c];
+					if (off == null) continue;
+					const blk = tr.children?.[c]?.children?.[b.keep[c] ?? 0];
+					if (blk && blk.type == DomType.Paragraph) insertParagraphBreak(blk as WmlParagraph, off);
+				}
+			}
 		}
 	}
 	for (const miStr in paraOffsets) {
