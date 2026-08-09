@@ -677,6 +677,23 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 			if (rows[j].getBoundingClientRect().bottom > limit + EPS) { splitIdx = j; break; }
 		}
 		if (splitIdx < 0) splitIdx = rows.length;
+
+		// A row taller than what is left of the page is SPLIT, not moved: OOXML
+		// rows split unless they say w:cantSplit, and Word and LibreOffice both
+		// take as much of the row as fits. This is tried FIRST - before the rule
+		// that a header row may not be left alone - because splitting the row
+		// behind the header is exactly what stops it being alone.
+		const keep = splitIdx < rows.length ? rowSplitKeep(rows[splitIdx], limit) : null;
+		if (keep) {
+			if (tmi != null) ctx.record({ kind: "rowSplit", mi: tmi, row: modelRow(splitIdx), keep });
+			const tail = rowTail(rows[splitIdx], keep);
+			const sheetR = newSheet(section);
+			const contR = contentRoot(sheetR);
+			contR.appendChild(splitTableAt(table, splitIdx + 1, tail));
+			moveFollowing(contR, crossing.nextElementSibling);
+			return sheetR;
+		}
+
 		if (splitIdx > clones && splitIdx <= headerRowCount(table)) splitIdx = clones; // never split off a bare header
 		if (splitIdx <= clones) {
 			if (!isFirst) {
@@ -697,22 +714,6 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 			splitIdx = clones + 1;
 		}
 		if (splitIdx >= rows.length && rows.length > 0 && !crossing.nextElementSibling) return null;
-
-		// A row taller than what is left of the page is SPLIT, not moved: OOXML
-		// rows split unless they say w:cantSplit, and Word and LibreOffice both
-		// take as much of the row as fits. Moving it whole leaves the page short
-		// by everything that row would have filled - on a table-heavy document
-		// that is most of a page.
-		const keep = splitIdx < rows.length ? rowSplitKeep(rows[splitIdx], limit) : null;
-		if (keep) {
-			if (tmi != null) ctx.record({ kind: "rowSplit", mi: tmi, row: modelRow(splitIdx), keep });
-			const tail = rowTail(rows[splitIdx], keep);
-			const sheetR = newSheet(section);
-			const contR = contentRoot(sheetR);
-			contR.appendChild(splitTableAt(table, splitIdx + 1, tail));
-			moveFollowing(contR, crossing.nextElementSibling);
-			return sheetR;
-		}
 
 		if (tmi != null && splitIdx < rows.length) ctx.record({ kind: "tableRow", mi: tmi, row: modelRow(splitIdx) });
 		const sheetB = newSheet(section);
