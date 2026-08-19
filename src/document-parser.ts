@@ -246,6 +246,7 @@ export class DocumentParser {
 	parseDefaultStyles(node: Element): IDomStyle {
 		var result = <IDomStyle>{
 			id: null,
+			isDocDefaults: true,
 			name: null,
 			target: null,
 			basedOn: null,

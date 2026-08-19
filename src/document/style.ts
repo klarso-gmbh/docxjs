@@ -9,6 +9,7 @@ export interface IDomStyle {
     target: string;
     basedOn?: string;
     isDefault?: boolean;
+    isDocDefaults?: boolean;
     styles: IDomSubStyle[];
     linked?: string;
     next?: string;

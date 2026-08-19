@@ -1067,6 +1067,16 @@ section.${c}>footer { z-index: 0; }
 		const defautStyles = keyBy(styles.filter(s => s.isDefault), s => s.target);
 
 		for (const style of styles) {
+			// A w:style without a w:styleId cannot be referenced by anything, and
+			// Word ignores it. We must too: with no id it takes the wrapper's own
+			// class name (processStyleName(null)), so it would apply itself to
+			// every paragraph and every run in the document.
+			if (style.id == null && !style.isDocDefaults) {
+				if (this.options.debug)
+					console.warn(`Skipping style without id: ${style.name}`);
+				continue;
+			}
+
 			var subStyles = style.styles;
 
 			if (style.linked) {
@@ -1095,9 +1105,9 @@ section.${c}>footer { z-index: 0; }
 				// line tall. A browser has no mark, so an empty paragraph would take
 				// its size from the user agent instead of from the document. Put the
 				// defaults on the wrapper, where anything without a run of its own
-				// inherits them. (docDefaults is the style with a null id -
-				// isDefault is not set on it.)
-				if (style.id == null && subStyle.target == "span")
+				// inherits them. (docDefaults carries no id, and isDefault is not
+				// set on it either, hence its own flag.)
+				if (style.isDocDefaults && subStyle.target == "span")
 					styleText += this.styleToString(`.${this.className}`, subStyle.values);
 			}
 		}
