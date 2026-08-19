@@ -1174,6 +1174,28 @@ function anchorBaseY(rel: string | null, anchor: HTMLElement, sheet: DOMRect, pa
 	}
 }
 
+/* A sheet of paper is one size. min-height alone does not guarantee that: the
+   article carries `margin-bottom: auto` to push the footer down, and as soon as
+   the article is taller than the body band that margin resolves to 0 and the
+   section grows instead - so a page with a fraction too much on it came out
+   taller than every other page.
+
+   Nothing of the DOCUMENT is lost by pinning it. The paginator's invariant is
+   that the CONTENT fits (contentBottom): what can still reach past the band is
+   the space below it - a cell's bottom padding, the space after a paragraph -
+   which Word also lets the page edge cut. The sections clip (overflow: hidden),
+   so that space is simply not drawn.
+
+   Idempotent, and only for measured pagination: an unpaginated section has to
+   keep growing to hold the whole document. */
+export function pinSheetHeights(container: HTMLElement) {
+	const sheets = container.querySelectorAll<HTMLElement>("section.docx");
+	for (let i = 0; i < sheets.length; i++) {
+		const target = sheetGeometry(sheets[i]).target;
+		if (target > 0) sheets[i].style.height = target + "px";
+	}
+}
+
 export function positionAnchoredFrames(container: HTMLElement, settings: WmlSettings) {
 	const mirror = !!(settings && settings.mirrorMargins);
 	const sheets = container.querySelectorAll<HTMLElement>("section.docx");

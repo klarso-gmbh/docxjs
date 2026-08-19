@@ -1,7 +1,7 @@
 import { WordDocument } from './word-document';
 import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
-import { positionAnchoredFrames } from './measured-pagination';
+import { positionAnchoredFrames, pinSheetHeights } from './measured-pagination';
 import { h } from './html';
 
 export interface Options {
@@ -113,8 +113,11 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
     // the page's final, possibly mirror-swapped padding to be positioned - which
     // is only measurable once the pages are attached. (The even/odd padding swap
     // itself happens during render, in createPageElement.)
-    if (userOptions?.measuredPagination)
+    if (userOptions?.measuredPagination) {
         positionAnchoredFrames(bodyContainer, doc.settingsPart?.settings);
+        // last: the anchors are measured against the sheet as laid out
+        pinSheetHeights(bodyContainer);
+    }
 
     return doc;
 }

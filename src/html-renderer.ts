@@ -866,6 +866,11 @@ export class HtmlRenderer {
 .${c} { color: black; hyphens: auto; text-underline-position: from-font; text-rendering: geometricPrecision; font-kerning: none; }
 section.${c} { box-sizing: border-box; display: flex; flex-flow: column nowrap; position: relative; overflow: hidden; }
 section.${c}>article { margin-bottom: auto; z-index: 1; }
+/* The space AFTER the last block on a sheet is not carried across the break -
+   Word does not let it push the page taller, and neither may we: the article's
+   auto margin resolves to 0 as soon as the content plus that space exceeds the
+   body band, and the sheet grows instead. Sheets would then differ in size. */
+section.${c}>article>*:last-child { margin-bottom: 0; }
 section.${c}>header { z-index: 0; }
 section.${c}>footer { z-index: 0; }
 .${c} table { border-collapse: collapse; }
