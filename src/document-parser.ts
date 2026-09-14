@@ -1322,6 +1322,11 @@ export class DocumentParser {
 
 	parseTableCell(node: Element): OpenXmlElement {
 		var result: WmlTableCell = { type: DomType.Cell, children: [] };
+		// CT_Tc has no w:pPr - but a writer that aligns a whole cell instead of
+		// every paragraph in it puts one there, and Word applies it to the cell.
+		// Kept as formatting of the cell: from there it reaches every paragraph
+		// by inheritance, and a paragraph that formats itself still wins.
+		let cellParagraphStyle: Record<string, string> = null;
 
 		for (const c of xml.elements(node)) {
 			switch (c.localName) {
@@ -1336,8 +1341,16 @@ export class DocumentParser {
 				case "tcPr":
 					this.parseTableCellProperties(c, result);
 					break;
+
+				case "pPr":
+					cellParagraphStyle = this.parseDefaultProperties(c, {});
+					break;
 			}
 		}
+
+		// the cell properties win, whichever order the two elements arrived in
+		if (cellParagraphStyle)
+			result.cssStyle = Object.assign(cellParagraphStyle, result.cssStyle);
 
 		return result;
 	}
