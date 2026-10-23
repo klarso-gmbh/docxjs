@@ -151,10 +151,11 @@ export function applyMeasuredGeometry(
 	hfPartsByPath: Record<string, OpenXmlElement>,
 	settings: WmlSettings,
 	lineMul: number | null,
-	shrink: number = JUSTIFY_SHRINK_DEFAULT
+	shrink: number = JUSTIFY_SHRINK_DEFAULT,
+	explicitSingleLines: boolean = false
 ) {
 	const justifyShrink = !!(settings && settings.compatibilityMode >= 15);
-	if (!lineMul && !justifyShrink) return;
+	if (!lineMul && !justifyShrink && !explicitSingleLines) return;
 
 	const cache: Record<string, number> = {};
 	// Probe the font's natural line as a ratio of the em size by INHERITANCE
@@ -217,7 +218,7 @@ export function applyMeasuredGeometry(
 	const hfMap = buildHeaderFooterMap(host, hfPartsByPath);
 
 	// pass A: resolve every paragraph's face and probe where possible
-	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; spaceKey: string | null; biasKey: string; italic: boolean; }
+	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; lineMul: number | null; spaceKey: string | null; biasKey: string; italic: boolean; }
 	const items: Item[] = [];
 	const faceOfFamily: Record<string, Record<string, boolean>> = {};
 	const paras = host.querySelectorAll<HTMLElement>("section.docx p");
@@ -239,6 +240,11 @@ export function applyMeasuredGeometry(
 		// an inline line-height is a document rule (exact/atLeast) - keep it,
 		// but justified spaces still shrink in Word
 		const hasOwnLine = !!p.style.lineHeight;
+		// no rule reaches the paragraph (none in docDefaults, its style or
+		// itself): Word lays it out single, the engine computes "normal" from
+		// font metrics rounded to whole pixels - on request, set it explicitly
+		const itemLineMul = lineMul
+			|| (explicitSingleLines && getComputedStyle(p).lineHeight === "normal" ? 1 : null);
 		const span = p.querySelector("span");
 		const cs = getComputedStyle(span || p);
 		const faceKey = cs.fontFamily + "|" + cs.fontWeight + "|" + cs.fontStyle;
@@ -251,7 +257,7 @@ export function applyMeasuredGeometry(
 		const size = parseFloat(cs.fontSize);
 		const biasKey = "bias:" + faceKey + "|" + size;
 		probeAdvanceBias(biasKey, span || p, size);
-		items.push({ p, model, size, family: cs.fontFamily, hasOwnLine,
+		items.push({ p, model, size, family: cs.fontFamily, hasOwnLine, lineMul: itemLineMul,
 			spaceKey: shrink ? "sp:" + faceKey : null, biasKey,
 			italic: cs.fontStyle === "italic" || cs.fontStyle === "oblique" });
 	}
@@ -270,8 +276,8 @@ export function applyMeasuredGeometry(
 	for (const it of items) {
 		const css = (it.model.cssStyle = it.model.cssStyle || {});
 		if (!it.hasOwnLine) {
-			if (lineMul) {
-				const lh = (lineMul * it.size * familyRatio[it.family]).toFixed(2) + "px";
+			if (it.lineMul) {
+				const lh = (it.lineMul * it.size * familyRatio[it.family]).toFixed(2) + "px";
 				css["line-height"] = lh;
 				it.p.style.lineHeight = lh;
 			}
@@ -312,7 +318,7 @@ export function applyMeasuredGeometry(
 		//       nLineWidth -= nPorHeight / 12;                (sw/.../text/guess.cxx)
 		// so an italic line wraps a word earlier than its advances alone would.
 		if (it.italic) {
-			const pad = (it.size * (lineMul ? lineMul * familyRatio[it.family] : 1.2) / 12).toFixed(2) + "px";
+			const pad = (it.size * (it.lineMul ? it.lineMul * familyRatio[it.family] : 1.2) / 12).toFixed(2) + "px";
 			css["padding-right"] = pad;
 			it.p.style.paddingRight = pad;
 		}

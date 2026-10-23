@@ -465,7 +465,8 @@ export class HtmlRenderer {
 			const lineMul = getAutoLineMul(wordDoc);
 			const shrink = this.options.justificationShrink != null
 				? -Math.abs(this.options.justificationShrink) : undefined;
-			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink);
+			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink,
+				this.options.explicitSingleLines);
 
 			const breaks = findMeasuredBreaks(host);
 			// expose the breaks addressed against the original document BEFORE

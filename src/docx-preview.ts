@@ -54,6 +54,15 @@ export interface Options {
     // spaces may shrink to pull a word onto a line (Word 2013+ behavior).
     // Given as a positive fraction (e.g. 0.4 = up to 40%); defaults to 0.4.
     justificationShrink?: number;
+    // Under measuredPagination, give each paragraph that no line-spacing rule
+    // reaches (none in docDefaults, its style or itself - Word lays it out
+    // single) an explicit single line: the em ratio of its font's line
+    // metrics, probed large, times the font size. Otherwise the engine's
+    // "normal" applies, built from metrics rounded to whole pixels - 3% short
+    // per line for some fonts. Meant for pages that load their fonts with
+    // Word's line metrics (FontFace ascent/descent/lineGap overrides).
+    // Off by default.
+    explicitSingleLines?: boolean;
     h: typeof h;
 }
 
@@ -82,6 +91,7 @@ export const defaultOptions: Options = {
     hyphenate: null,
     onMeasuredBreaks: null,
     justificationShrink: 0.4,
+    explicitSingleLines: false,
     h: h
 };
 
