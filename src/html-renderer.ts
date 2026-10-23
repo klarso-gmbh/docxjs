@@ -13,7 +13,7 @@ import { WmlParagraph } from './document/paragraph';
 import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
-import { FooterHeaderReference, SectionProperties } from './document/section';
+import { FooterHeaderReference, SectionProperties, SectionType } from './document/section';
 import { WmlRun } from './document/run';
 import { WmlFieldSimple } from './document/fields';
 import { WmlBookmarkStart } from './document/bookmarks';
@@ -27,7 +27,7 @@ import { WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
 import {
 	assignModelIndices, applyMeasuredGeometry, findMeasuredBreaks, applyBreaksToModel,
-	resolveBreaksToDocument, hyphenateModel, getAutoLineMul
+	resolveBreaksToDocument, hyphenateModel, getAutoLineMul, removeSavedPageBreaks
 } from './measured-pagination';
 
 interface CellPos {
@@ -78,6 +78,10 @@ export class HtmlRenderer {
 	measuredMiMap: Map<number, OpenXmlElement> = null;
 	currentPageIndex = 0;
 	hfPartsByPath: Record<string, OpenXmlElement> = {};
+	// the document's saved page breaks were removed (ignoreLastRenderedPageBreak
+	// under measured pagination): section starts are then the renderer's to
+	// break, see sectionStartsPage
+	savedBreaksRemoved = false;
 
 	defaultTabSize: string;
 	currentTabs: any[] = [];
@@ -97,6 +101,7 @@ export class HtmlRenderer {
 		this.h = options.h ?? h;
 		this.styleMap = null;
 		this.defaultParagraphStyleId = null;
+		this.savedBreaksRemoved = false;
 		this.tasks = [];
 
 		if (this.options.renderComments && globalThis.Highlight) {
@@ -391,10 +396,18 @@ export class HtmlRenderer {
 			this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props,
 				result.length, prevProps != props, pageElement);
 
+			let contentElement: Node = null;
 			for (const sect of pages[i]) {
-				var contentElement = this.createSectionContent(sect.sectProps);
-				this.renderElements(sect.elements, contentElement);
-				pageElement.appendChild(contentElement);
+				// measured pagination paginates a sheet's first article only: once
+				// the saved page breaks are gone, a continuous section in the same
+				// columns continues in that article, as its text does in Word
+				if (contentElement && this.savedBreaksRemoved && this.sameColumns(props, sect.sectProps)) {
+					this.renderElements(sect.elements, contentElement);
+				} else {
+					contentElement = this.createSectionContent(sect.sectProps);
+					this.renderElements(sect.elements, contentElement);
+					pageElement.appendChild(contentElement);
+				}
 				props = sect.sectProps;
 			}
 
@@ -430,8 +443,14 @@ export class HtmlRenderer {
 
 		// measured pagination expresses breaks as lastRenderedPageBreak markers,
 		// so both passes must honor them (and pass 1 must group the doc into as few
-		// sheets as its own breaks dictate, then measure the overflow)
+		// sheets as its own breaks dictate, then measure the overflow). A caller
+		// that ignores the document's own markers has them removed first, so the
+		// pages follow the measurement alone.
+		const markersRemoved = this.options.ignoreLastRenderedPageBreak;
+		if (markersRemoved)
+			removeSavedPageBreaks(body);
 		this.options.ignoreLastRenderedPageBreak = false;
+		this.savedBreaksRemoved = markersRemoved;
 
 		// hyphenate the model text (both passes see the same soft hyphens)
 		if (this.options.hyphenate && settings?.autoHyphenation) {
@@ -468,7 +487,7 @@ export class HtmlRenderer {
 			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink,
 				this.options.explicitSingleLines);
 
-			const breaks = findMeasuredBreaks(host);
+			const breaks = findMeasuredBreaks(host, markersRemoved);
 			// expose the breaks addressed against the original document BEFORE
 			// applyBreaksToModel mutates the paragraphs (offsets still line up)
 			if (this.options.onMeasuredBreaks) {
@@ -853,16 +872,36 @@ export class HtmlRenderer {
 		let prev: SectionProperties;
 		const result: Section[][] = [current];
 
-		for (let s of sections) {
+		for (let i = 0; i < sections.length; i++) {
+			const s = sections[i];
 			current.push(s);
 
-			if (this.options.ignoreLastRenderedPageBreak || s.pageBreak || this.isPageBreakSection(prev, s.sectProps))
+			if (this.options.ignoreLastRenderedPageBreak || s.pageBreak || this.isPageBreakSection(prev, s.sectProps)
+				|| this.sectionStartsPage(s, sections[i + 1]))
 				result.push(current = []);
 
 			prev = s.sectProps;
 		}
 
 		return result.filter(x => x.length > 0);
+	}
+
+	/* Whether the Word section that follows `s` starts on a new page. Word starts
+	   every section on a new page except a continuous one on the same page size
+	   (nextPage is the default; evenPage and oddPage may add a blank page, which
+	   is not reproduced). A document Word saved has a lastRenderedPageBreak at
+	   the top of such a page, which breaks it here; once those markers are
+	   removed, the section's type has to. */
+	sectionStartsPage(s: Section, next: Section): boolean {
+		return this.savedBreaksRemoved && !!next && next.sectProps !== s.sectProps
+			&& (next.sectProps?.type !== SectionType.Continuous || this.isPageBreakSection(s.sectProps, next.sectProps));
+	}
+
+	// the same column layout - all of a section that createSectionContent uses
+	sameColumns(a: SectionProperties, b: SectionProperties): boolean {
+		const cols = (p: SectionProperties) => (p?.columns?.numberOfColumns ?? 1) > 1
+			? `${p.columns.numberOfColumns}|${p.columns.space}|${!!p.columns.separator}` : "1";
+		return cols(a) === cols(b);
 	}
 
 	renderWrapper(children: HTMLElement[]) {

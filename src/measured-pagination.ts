@@ -88,6 +88,28 @@ export function assignModelIndices(body: DocumentElement): Map<number, OpenXmlEl
 	return map;
 }
 
+/* Removes the lastRenderedPageBreak markers the document was saved with. They
+   record where the application that last saved it broke the pages - with that
+   machine's fonts and settings - and Word does not follow them either: it lays
+   the pages out anew on open. Returns how many were removed. */
+export function removeSavedPageBreaks(body: DocumentElement): number {
+	let removed = 0;
+	const walk = (el: OpenXmlElement) => {
+		if (!el.children) return;
+		for (let i = el.children.length - 1; i >= 0; i--) {
+			const c = el.children[i];
+			if (c.type == DomType.Break && (c as WmlBreak).break == "lastRenderedPageBreak") {
+				el.children.splice(i, 1);
+				removed++;
+			} else {
+				walk(c);
+			}
+		}
+	};
+	walk(body);
+	return removed;
+}
+
 // ===========================================================================
 // 2. Geometry - Word line metrics + justified shrink, measured once per font.
 // ===========================================================================
@@ -823,20 +845,26 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 	return sheet;
 }
 
-function needsPagination(section: HTMLElement, geo: { target: number }): boolean {
-	const tolerance = Math.max(24, geo.target * 0.05);
+/* A sheet the document's own saved page breaks delimit is left alone while it
+   overflows by less than a tolerance. Once those breaks are removed, every
+   sheet comes from the measurement alone, so any overflow is a page Word turns
+   too: left alone, the sheet keeps the content, and the fixed-height page
+   squeezes its header and footer over the body. */
+function needsPagination(section: HTMLElement, geo: { target: number }, exact: boolean): boolean {
+	const tolerance = exact ? EPS : Math.max(24, geo.target * 0.05);
 	return section.getBoundingClientRect().height > geo.target + tolerance;
 }
 
 /* Runs the measured paginator over the host and returns the model break
-   descriptors (the DOM is mutated in place - that host is discarded). */
-export function findMeasuredBreaks(host: HTMLElement): BreakDesc[] {
+   descriptors (the DOM is mutated in place - that host is discarded).
+   `exact`: the saved page breaks were removed (see needsPagination). */
+export function findMeasuredBreaks(host: HTMLElement, exact = false): BreakDesc[] {
 	const ctx: PaginateCtx = { breaks: [], record(d) { this.breaks.push(d); } };
 	const originals = Array.prototype.slice.call(host.querySelectorAll("section.docx")) as HTMLElement[];
 	let safety = SAFETY_MAX_SHEETS;
 	for (const orig of originals) {
 		const geo = sheetGeometry(orig);
-		if (!geo.target || !needsPagination(orig, geo)) continue;
+		if (!geo.target || !needsPagination(orig, geo, exact)) continue;
 		let sheet: HTMLElement = orig;
 		while (sheet && safety-- > 0) sheet = paginateSheet(sheet, geo, ctx);
 	}

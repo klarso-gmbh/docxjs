@@ -30,7 +30,10 @@ export interface Options {
     // a page, and re-renders so pages split at Word-faithful boundaries. Also
     // applies Word's "auto" line metrics, justified space shrinking and (with
     // `hyphenate`) automatic hyphenation. Off by default: the render is then
-    // byte-identical to stock docx-preview.
+    // byte-identical to stock docx-preview. The lastRenderedPageBreak markers
+    // the document was saved with break pages as well only with
+    // `ignoreLastRenderedPageBreak: false`; otherwise they are removed first
+    // and the measurement alone decides, as Word re-paginates on open.
     measuredPagination: boolean;
     // Batch hyphenation callback used only under measuredPagination when the
     // document opts into automatic hyphenation. Receives the unique body words
