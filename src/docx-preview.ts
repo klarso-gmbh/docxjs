@@ -66,6 +66,13 @@ export interface Options {
     // Word's line metrics (FontFace ascent/descent/lineGap overrides).
     // Off by default.
     explicitSingleLines?: boolean;
+    // Render each numbering label ("1", "(2)", "a)") as a real text span at
+    // the start of its paragraph, styled like the CSS ::before marker it
+    // replaces, and count it the way Word does: a level restarts the levels
+    // below it (w:lvlRestart aside), and each %N takes level N's own format.
+    // Generated content is not text, so a page that reads the text from the
+    // DOM (the Klarso PDF converter) needs this. Off by default.
+    numberingAsText?: boolean;
     h: typeof h;
 }
 
@@ -95,6 +102,7 @@ export const defaultOptions: Options = {
     onMeasuredBreaks: null,
     justificationShrink: 0.4,
     explicitSingleLines: false,
+    numberingAsText: false,
     h: h
 };
 

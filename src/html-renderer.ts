@@ -55,6 +55,10 @@ export class HtmlRenderer {
 	// the default paragraph style (w:default="1"), which formats every
 	// paragraph without a w:pStyle
 	defaultParagraphStyleId: string = null;
+	// numberingAsText: the levels of every w:num by level, and the running
+	// count of each (reset per render pass)
+	numberingLevels: Record<string, Record<number, IDomNumbering>> = {};
+	numberingCounters: Record<string, number[]> = {};
 	currentPart: Part = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
@@ -102,6 +106,7 @@ export class HtmlRenderer {
 		this.styleMap = null;
 		this.defaultParagraphStyleId = null;
 		this.savedBreaksRemoved = false;
+		this.numberingLevels = {};
 		this.tasks = [];
 
 		if (this.options.renderComments && globalThis.Highlight) {
@@ -128,6 +133,8 @@ export class HtmlRenderer {
 		// paragraph's own gets a more specific rule (see renderNumbering).
 		if (document.numberingPart) {
 			this.prodessNumberings(document.numberingPart.domNumberings);
+			for (const num of document.numberingPart.domNumberings)
+				(this.numberingLevels[num.id] ??= {})[num.level] = num;
 
 			result.push(...await this.renderNumbering(document.numberingPart.domNumberings));
 			//result.push(...await this.renderNumbering2(document.numberingPart.domNumberings));
@@ -371,6 +378,8 @@ export class HtmlRenderer {
 
 	renderSections(document: DocumentElement): HTMLElement[] {
 		const result = [];
+		// every render pass numbers the document from its start
+		this.numberingCounters = {};
 
 		this.processElement(document);
 		const sections = this.splitBySection(document.children, document.props);
@@ -1095,9 +1104,19 @@ section.${c}>footer { z-index: 0; }
 					beforeValues["text-indent"] = "0";
 				}
 
-				styleText += this.styleToString(`${selector}:before`, beforeValues);
+				// numberingAsText: the same box around a real text span the
+				// paragraph renders itself - no generated content, no CSS counter
+				if (this.options.numberingAsText) {
+					const labelValues = { ...beforeValues };
+					delete labelValues["content"];
+					delete labelValues["counter-increment"];
+					styleText += this.styleToString(`${selector} > [data-docx-num-label]`, labelValues);
+				} else {
+					styleText += this.styleToString(`${selector}:before`, beforeValues);
+				}
 				if (directMinWidth && directMinWidth != beforeValues["min-width"])
-					styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}:before`, { "min-width": directMinWidth });
+					styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}`
+						+ (this.options.numberingAsText ? " > [data-docx-num-label]" : ":before"), { "min-width": directMinWidth });
 			}
 			else {
 				listStyleType = this.numFormatToCssValue(num.format);
@@ -1411,6 +1430,15 @@ section.${c}>footer { z-index: 0; }
 			// properties beat the style's (see renderNumbering)
 			if (numbering === elem.numbering)
 				result.classList.add(this.numberingDirectClass());
+
+			// numberingAsText: the label as the paragraph's first span, styled
+			// by the marker rule renderNumbering writes for it
+			const label = this.options.numberingAsText ? this.numberingLabel(numbering.id, numbering.level) : null;
+			if (label != null) {
+				const span = this.h({ tagName: "span", children: [label] }) as HTMLElement;
+				span.setAttribute("data-docx-num-label", "");
+				result.insertBefore(span, result.firstChild);
+			}
 		}
 
 		if (this.options.measuredPagination && (elem as any).$mi != null)
@@ -2010,6 +2038,66 @@ section.${c}>footer { z-index: 0; }
 
 	numberingCounter(id: string, lvl: number) {
 		return `${this.className}-num-${id}-${lvl}`;
+	}
+
+	/* The label of the next paragraph at this level, counted the way Word
+	   counts: the level goes up by one, every level below it starts over
+	   (unless its w:lvlRestart says otherwise), and each %N in the level text
+	   shows level N's count in level N's own format. Null when the level has
+	   no text (a picture bullet, or no level at all) - those stay CSS. */
+	numberingLabel(numId: string, level: number): string {
+		const levels = this.numberingLevels[numId];
+		const lvl = levels?.[level];
+		if (lvl?.levelText == null || lvl.bullet)
+			return null;
+
+		const counts = (this.numberingCounters[numId] ??= []);
+		counts[level] = (counts[level] ?? lvl.start - 1) + 1;
+		for (const key in levels) {
+			const below = levels[key];
+			// absent w:lvlRestart: restarts after any level above it; 0: never
+			if (below.level > level && level < (below.restart ?? below.level))
+				counts[below.level] = undefined;
+		}
+
+		return lvl.levelText.replace(/%(\d)/g, (s, n) => {
+			const ref = levels[parseInt(n, 10) - 1];
+			return ref ? this.formatNumber(counts[ref.level] ?? ref.start, ref.format) : "";
+		});
+	}
+
+	/* A count in a w:numFmt the way Word writes it - letters repeat past z
+	   (y, z, aa, bb); formats not covered here fall back to decimal. */
+	formatNumber(value: number, format: string): string {
+		switch (format) {
+			case "none":
+			case "bullet":
+				return "";
+
+			case "decimalZero":
+				return value >= 0 && value < 10 ? "0" + value : String(value);
+
+			case "lowerLetter":
+			case "upperLetter": {
+				if (value < 1) return String(value);
+				const letters = String.fromCharCode(97 + (value - 1) % 26).repeat(Math.floor((value - 1) / 26) + 1);
+				return format == "upperLetter" ? letters.toUpperCase() : letters;
+			}
+
+			case "lowerRoman":
+			case "upperRoman": {
+				if (value < 1 || value > 3999) return String(value);
+				const digits: [number, string][] = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"],
+					[90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]];
+				let roman = "";
+				for (const [n, s] of digits)
+					while (value >= n) { roman += s; value -= n; }
+				return format == "lowerRoman" ? roman.toLowerCase() : roman;
+			}
+
+			default:
+				return String(value);
+		}
 	}
 
 	levelTextToContent(text: string, suff: string, id: string, numformat: string) {

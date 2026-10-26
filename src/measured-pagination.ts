@@ -267,7 +267,8 @@ export function applyMeasuredGeometry(
 		// font metrics rounded to whole pixels - on request, set it explicitly
 		const itemLineMul = lineMul
 			|| (explicitSingleLines && getComputedStyle(p).lineHeight === "normal" ? 1 : null);
-		const span = p.querySelector("span");
+		// the paragraph's own text, not a numbering label (numberingAsText)
+		const span = p.querySelector<HTMLElement>("span:not([data-docx-num-label])");
 		const cs = getComputedStyle(span || p);
 		const faceKey = cs.fontFamily + "|" + cs.fontWeight + "|" + cs.fontStyle;
 		if (!hasOwnLine) {
@@ -544,6 +545,10 @@ function atomsOf(el: HTMLElement): (Text | Element)[] {
 	const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
 		acceptNode(n: Node) {
 			if (n.nodeType === 3) return (n as Text).nodeValue.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+			// a numbering label (numberingAsText) is not paragraph text: break
+			// offsets count the model's characters, and the label sits in the
+			// first line like the CSS marker it replaces
+			if ((n as Element).hasAttribute("data-docx-num-label")) return NodeFilter.FILTER_REJECT;
 			return (n as Element).tagName === "IMG" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
 		}
 	});

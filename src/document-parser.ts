@@ -541,6 +541,10 @@ export class DocumentParser {
 				case "suff":
 					result.suff = xml.attr(n, "val");
 					break;
+
+				case "lvlRestart":
+					result.restart = xml.intAttr(n, "val");
+					break;
 			}
 		}
 
