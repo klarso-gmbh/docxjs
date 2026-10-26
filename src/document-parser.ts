@@ -1518,8 +1518,9 @@ export class DocumentParser {
 
 				case "pBdr":
 					this.parseBorderProperties(c, style);
-					// the spacing is applied once every property is known, see
-					// parseParagraphProperties - it has to compose with the indent
+					this.parseParagraphBorderPadding(c, style);
+					// the left/right spacing is applied once every property is known,
+					// see parseParagraphProperties - it has to compose with the indent
 					break;
 
 				case "bdr":
@@ -1805,6 +1806,24 @@ export class DocumentParser {
 
 			style[`margin-inline-${logical}`] = `calc(${base} - ${offset.toFixed(2)}pt)`;
 			style[`padding-${side}`] = space;
+		}
+	}
+
+	// Word keeps w:space points between a top or bottom paragraph border and
+	// the text, and the paragraph grows by them (the border's own width is
+	// part of the CSS box already). Unlike left/right this moves nothing
+	// sideways, so it needs no indent and holds for a style's borders too.
+	parseParagraphBorderPadding(node: Element, style: Record<string, string>) {
+		for (const side of ["top", "bottom"]) {
+			const el = xml.element(node, side);
+
+			if (!el || values.parseBorderType(xml.attr(el, "val")) == "none")
+				continue;
+
+			const space = xml.lengthAttr(el, "space", LengthUsage.Point);
+
+			if (space)
+				style[`padding-${side}`] = space;
 		}
 	}
 

@@ -52,6 +52,9 @@ export class HtmlRenderer {
 	document: WordDocument;
 	options: Options;
 	styleMap: Record<string, IDomStyle> = {};
+	// the default paragraph style (w:default="1"), which formats every
+	// paragraph without a w:pStyle
+	defaultParagraphStyleId: string = null;
 	currentPart: Part = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
@@ -93,6 +96,7 @@ export class HtmlRenderer {
 		this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
 		this.h = options.h ?? h;
 		this.styleMap = null;
+		this.defaultParagraphStyleId = null;
 		this.tasks = [];
 
 		if (this.options.renderComments && globalThis.Highlight) {
@@ -107,15 +111,25 @@ export class HtmlRenderer {
 
 		if (document.stylesPart != null) {
 			this.styleMap = this.processStyles(document.stylesPart.styles);
-			result.push(...this.renderStyles(document.stylesPart.styles));
+			this.defaultParagraphStyleId = document.stylesPart.styles.find(s => s.isDefault && s.target == "p")?.id ?? null;
 		}
 
+		// numbering rules go BEFORE the style rules: ECMA-376 17.7.2 applies the
+		// numbering a style brings, then the paragraph style, then the direct
+		// formatting - numbering in the paragraph's own properties included. Of
+		// two equally specific rules the later one wins, so a style beats the
+		// numbering it brings itself: a Ril "a)" item is indented by its style
+		// (709/284 twips), not by its level (1020/510). Numbering of the
+		// paragraph's own gets a more specific rule (see renderNumbering).
 		if (document.numberingPart) {
 			this.prodessNumberings(document.numberingPart.domNumberings);
 
 			result.push(...await this.renderNumbering(document.numberingPart.domNumberings));
 			//result.push(...await this.renderNumbering2(document.numberingPart.domNumberings));
 		}
+
+		if (document.stylesPart != null)
+			result.push(...this.renderStyles(document.stylesPart.styles));
 
 		if (document.footnotesPart) {
 			this.footnoteMap = keyBy(document.footnotesPart.notes, x => x.id);
@@ -712,7 +726,7 @@ export class HtmlRenderer {
 			}
 
 			if (elem.type == DomType.Paragraph && !(elem as any).$splitCont) {
-				const s = this.findStyle((elem as WmlParagraph).styleName);
+				const s = this.findStyle(this.paragraphStyleName(elem as WmlParagraph));
 
 				if (s?.paragraphProps?.pageBreakBefore) {
 					current.sectProps = sectProps;
@@ -1021,14 +1035,15 @@ section.${c}>footer { z-index: 0; }
 				// tab stop sits at the paragraph's left indent - the marker box
 				// spans exactly the hanging width (= negative text-indent);
 				// otherwise fall back to one default tab stop.
+				var directMinWidth: string = null;
 				if (num.suff == null || num.suff == "tab") {
-					var hangingIndent = num.pStyle?.["text-indent"];
+					// the hanging indent the paragraph really gets: its linked
+					// style's own beats the level's (the style rules win, see
+					// render) - but not in a paragraph numbered by its own w:numPr
+					var linkedPara = linkedStyle?.styles?.find(s => s.target == "p")?.values;
 					beforeValues["display"] = "inline-block";
-					// levels declaring hanging="0" parse to "-0.00pt" - only a
-					// real (negative) hanging indent replaces the default stop
-					beforeValues["min-width"] = (hangingIndent && parseFloat(hangingIndent) < 0)
-						? hangingIndent.substring(1)
-						: (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
+					beforeValues["min-width"] = this.markerWidth(linkedPara?.["text-indent"] ?? num.pStyle?.["text-indent"]);
+					directMinWidth = this.markerWidth(num.pStyle?.["text-indent"]);
 					// baseline-aligned inline-blocks inflate the line box by
 					// their descent; top keeps the marker's internal baseline
 					// on the text baseline (same font/line-height) without that
@@ -1041,6 +1056,8 @@ section.${c}>footer { z-index: 0; }
 				}
 
 				styleText += this.styleToString(`${selector}:before`, beforeValues);
+				if (directMinWidth && directMinWidth != beforeValues["min-width"])
+					styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}:before`, { "min-width": directMinWidth });
 			}
 			else {
 				listStyleType = this.numFormatToCssValue(num.format);
@@ -1052,6 +1069,10 @@ section.${c}>footer { z-index: 0; }
 				"list-style-type": listStyleType,
 				...num.pStyle
 			});
+			// numbering of the paragraph's own comes with its direct formatting,
+			// after its style (ECMA-376 17.7.2): a rule more specific than the style's
+			if (num.pStyle && Object.keys(num.pStyle).length)
+				styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}`, num.pStyle);
 		}
 
 		if (resetCounters.length > 0) {
@@ -1095,7 +1116,13 @@ section.${c}>footer { z-index: 0; }
 
 			for (const subStyle of subStyles) {
 				//TODO temporary disable modificators until test it well
-				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''} 
+				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''}
+
+				// a character style beats the run properties of the default
+				// paragraph style, which every paragraph without a w:pStyle carries
+				// too (p.<default> span) - in Word the run's own style wins
+				if (style.target == "span" && defautStyles["p"])
+					selector += `, p.${defautStyles["p"].cssName} ${selector}`;
 
 				if (style.target != subStyle.target)
 					selector += ` ${subStyle.target}`;
@@ -1323,7 +1350,13 @@ section.${c}>footer { z-index: 0; }
 	renderParagraph(elem: WmlParagraph) {
 		var result = this.toHTML(elem, ns.html, "p");
 
-		const style = this.findStyle(elem.styleName);
+		// without a w:pStyle of its own the paragraph gets the default style's
+		// class too: its run properties apply to the paragraph's spans
+		const styleName = this.paragraphStyleName(elem);
+		if (styleName && !elem.styleName)
+			result.classList.add(this.processStyleName(styleName));
+
+		const style = this.findStyle(styleName);
 		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
 
 		// a continuation of a paragraph split at a measured page break must not
@@ -1334,6 +1367,10 @@ section.${c}>footer { z-index: 0; }
 
 		if (numbering) {
 			result.classList.add(this.numberingClass(numbering.id, numbering.level));
+			// numbered by its own w:numPr, not by its style: the level's paragraph
+			// properties beat the style's (see renderNumbering)
+			if (numbering === elem.numbering)
+				result.classList.add(this.numberingDirectClass());
 		}
 
 		if (this.options.measuredPagination && (elem as any).$mi != null)
@@ -1884,6 +1921,27 @@ section.${c}>footer { z-index: 0; }
 
 	findStyle(styleName: string) {
 		return styleName && this.styleMap?.[styleName];
+	}
+
+	/* The style a paragraph is formatted with: its w:pStyle, else the default
+	   paragraph style - Word applies that one to every paragraph without a
+	   w:pStyle, so the document defaults alone would put its runs in the wrong
+	   font. */
+	paragraphStyleName(elem: WmlParagraph): string {
+		return elem.styleName ?? this.defaultParagraphStyleId;
+	}
+
+	numberingDirectClass() {
+		return `${this.className}-num-direct`;
+	}
+
+	// the marker box of a "tab" suffix spans the hanging indent; levels
+	// declaring hanging="0" parse to "-0.00pt" - only a real (negative)
+	// hanging indent replaces the default tab stop
+	markerWidth(hangingIndent: string): string {
+		return (hangingIndent && parseFloat(hangingIndent) < 0)
+			? hangingIndent.substring(1)
+			: (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
 	}
 
 	numberingClass(id: string, lvl: number) {
