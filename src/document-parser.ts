@@ -1102,8 +1102,13 @@ export class DocumentParser {
 			// page. Absolute also anchors the drawing by its top edge at the
 			// anchor offset (matching Word), instead of baseline-aligning its
 			// bottom there, and is not clipped by the anchor's zero box.
-			for (const child of result.children)
+			// behindDoc is Word's "behind text": an absolutely positioned box
+			// paints over the text, so such a drawing goes below it.
+			for (const child of result.children) {
 				(child.cssStyle ??= {})["position"] = "absolute";
+				if (behindDoc)
+					child.cssStyle["z-index"] = "-1";
+			}
 		}
 		else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
 			result.cssStyle["float"] = posX.align;
