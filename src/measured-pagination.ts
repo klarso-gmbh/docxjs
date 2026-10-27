@@ -891,13 +891,15 @@ interface Atom { kind: "text" | "slot"; topChild: OpenXmlElement; leaf: OpenXmlE
 
 /* Flattens a paragraph's break atoms in document order, recording for each its
    direct paragraph child (the level splitBySection acts on) and start offset.
-   Skips runs the renderer drops (field code, deleted text). */
+   Skips runs the renderer drops (field code, further field result runs,
+   deleted text). */
 function paragraphAtoms(p: WmlParagraph): { atoms: Atom[]; total: number } {
 	const atoms: Atom[] = [];
 	let pos = 0;
 	for (const topChild of p.children ?? []) {
 		const visit = (el: OpenXmlElement) => {
-			if (el.type == DomType.Run && ((el as WmlRun).fieldRun || (el as WmlRun).fieldCodeContent)) return;
+			if (el.type == DomType.Run && ((el as WmlRun).fieldRun || (el as WmlRun).fieldCodeContent
+				|| (el as WmlRun).fieldResultRest)) return;
 			if (el.type == DomType.DeletedText) return; // renderChanges off in this path
 			if (el.type == DomType.Text) {
 				const len = (el as WmlText).text?.length ?? 0;

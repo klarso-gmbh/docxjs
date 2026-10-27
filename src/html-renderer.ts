@@ -86,6 +86,9 @@ export class HtmlRenderer {
 	// under measured pagination): section starts are then the renderer's to
 	// break, see sectionStartsPage
 	savedBreaksRemoved = false;
+	// measured pagination: the section of each data-docx-sect index, for the
+	// page numbers fillPageFields writes
+	sectionsByIndex: SectionProperties[] = [];
 
 	defaultTabSize: string;
 	currentTabs: any[] = [];
@@ -386,6 +389,7 @@ export class HtmlRenderer {
 		const pages = this.groupByPageBreaks(sections);
 		let prevProps = null;
 		const sectIndex = new Map<SectionProperties, number>();
+		this.sectionsByIndex = [];
 
 		for (let i = 0, l = pages.length; i < l; i++) {
 			this.currentFootnoteIds = [];
@@ -398,7 +402,10 @@ export class HtmlRenderer {
 			// stamp the Word section index (pages of one section share sectProps)
 			// so a consumer's page-number stamper can count SECTIONPAGES
 			if (this.options.measuredPagination) {
-				if (!sectIndex.has(props)) sectIndex.set(props, sectIndex.size);
+				if (!sectIndex.has(props)) {
+					sectIndex.set(props, sectIndex.size);
+					this.sectionsByIndex.push(props);
+				}
 				pageElement.setAttribute("data-docx-sect", String(sectIndex.get(props)));
 			}
 
@@ -1671,6 +1678,9 @@ section.${c}>footer { z-index: 0; }
 	renderRun(elem: WmlRun) {
 		if (elem.fieldRun || elem.fieldCodeContent)
 			return null;
+		// the field's first result run shows the whole filled value
+		if (elem.fieldResultRest && this.options.measuredPagination)
+			return null;
 
 		let children = this.renderElements(elem.children);
 
@@ -1683,43 +1693,90 @@ section.${c}>footer { z-index: 0; }
 		if (elem.id)
 			result.id = elem.id;
 
-		// mark PAGE/NUMPAGES/SECTIONPAGES result runs so measured pagination can
-		// fill the live per-page value (see fillPageFields)
+		// mark field result runs so measured pagination can fill the live value
+		// (see fillPageFields)
 		if (elem.fieldValue && this.options.measuredPagination)
-			result.setAttribute("data-docx-field", elem.fieldValue);
+			this.markField(result, elem.fieldValue, elem.fieldArg);
 
 		return result;
 	}
 
-	// A simple field (w:fldSimple). Only PAGE/NUMPAGES/SECTIONPAGES fields are
+	markField(el: HTMLElement, keyword: string, arg: string) {
+		el.setAttribute("data-docx-field", keyword);
+		if (arg) el.setAttribute("data-docx-field-arg", arg);
+	}
+
+	// A simple field (w:fldSimple). Only the fields fillPageFields fills are
 	// rendered, and only under measuredPagination (where the live value can be
 	// computed) - matching the default renderer, which does not render simple
 	// fields at all. The cached result is rendered as a placeholder and then
-	// overwritten per page by fillPageFields.
+	// overwritten by fillPageFields.
 	renderSimpleField(elem: WmlFieldSimple) {
 		if (!elem.fieldValue || !this.options.measuredPagination)
 			return null;
 
 		const result = this.toHTML(elem, ns.html, "span", this.renderElements(elem.children));
-		result.setAttribute("data-docx-field", elem.fieldValue);
+		this.markField(result, elem.fieldValue, elem.fieldArg);
 		return result;
 	}
 
-	// Fills PAGE/NUMPAGES/SECTIONPAGES field placeholders with live values now
-	// that the final pages are known. SECTIONPAGES counts pages sharing a
-	// section (data-docx-sect, stamped per page in measured mode).
+	// Fills PAGE/NUMPAGES/SECTIONPAGES/PAGEREF/REF field placeholders with live
+	// values now that the final pages are known. SECTIONPAGES counts pages
+	// sharing a section (data-docx-sect, stamped per page in measured mode).
+	// PAGEREF shows the page a bookmark starts on, REF the number label of the
+	// bookmarked paragraph (numberingAsText) - both the way a table of contents
+	// uses them. A field whose bookmark is missing keeps its cached result.
+	// PAGE and PAGEREF show the number Word gives a page: numbering runs on
+	// across sections unless one restarts it (w:pgNumType w:start), in each
+	// section's own format (w:fmt); NUMPAGES counts the pages.
 	fillPageFields(pages: HTMLElement[]) {
 		const sectKey = (s: HTMLElement, i: number) => s.getAttribute("data-docx-sect") ?? ("solo" + i);
 		const perSect: Record<string, number> = {};
 		pages.forEach((s, i) => { const k = sectKey(s, i); perSect[k] = (perSect[k] ?? 0) + 1; });
+		const pageNumbers: string[] = [];
+		let pageNumber = 0;
+		pages.forEach((s, i) => {
+			const sect = s.getAttribute("data-docx-sect");
+			const props = this.sectionsByIndex[parseInt(sect, 10)];
+			const start = props?.pageNumber?.start;
+			const restarts = (i == 0 || sect != pages[i - 1].getAttribute("data-docx-sect")) && Number.isInteger(start);
+			pageNumber = restarts ? start : pageNumber + 1;
+			pageNumbers.push(this.formatNumber(pageNumber, props?.pageNumber?.format ?? "decimal"));
+		});
+		// bookmarks render as <span id>; the first occurrence is where one starts,
+		// on the page of the first text after it: a bookmark Word saved in front
+		// of a page's first line stays in the empty paragraph head that the saved
+		// page break leaves on the page before (splitBySection)
+		const textFollows = (b: HTMLElement, page: HTMLElement) => {
+			const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT);
+			walker.currentNode = b;
+			for (let n = walker.nextNode(); n; n = walker.nextNode())
+				if (n.nodeValue.trim()) return true;
+			return false;
+		};
+		const bookmarks: Record<string, { el: HTMLElement; page: number }> = {};
+		pages.forEach((s, i) => s.querySelectorAll<HTMLElement>("span[id]").forEach(b => {
+			if (!bookmarks[b.id])
+				bookmarks[b.id] = { el: b, page: (textFollows(b, s) || i == pages.length - 1) ? i : i + 1 };
+		}));
+		const refValue = (keyword: string, arg: string): string | null => {
+			const b = bookmarks[arg];
+			if (!b) return null;
+			if (keyword === "PAGEREF") return pageNumbers[b.page];
+			const label = b.el.closest("p")?.querySelector("[data-docx-num-label]");
+			return label ? label.textContent.trim().replace(/\.+$/, "") : null;
+		};
 		pages.forEach((s, i) => {
 			const vals: Record<string, string> = {
-				PAGE: String(i + 1),
+				PAGE: pageNumbers[i],
 				NUMPAGES: String(pages.length),
 				SECTIONPAGES: String(perSect[sectKey(s, i)])
 			};
 			s.querySelectorAll<HTMLElement>("[data-docx-field]").forEach(el => {
-				const v = vals[el.getAttribute("data-docx-field")];
+				const keyword = el.getAttribute("data-docx-field");
+				const v = el.hasAttribute("data-docx-field-arg")
+					? refValue(keyword, el.getAttribute("data-docx-field-arg"))
+					: vals[keyword];
 				if (v != null) el.textContent = v;
 			});
 		});

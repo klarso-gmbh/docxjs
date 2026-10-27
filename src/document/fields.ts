@@ -13,6 +13,7 @@ export interface WmlFieldSimple extends OpenXmlElement {
     instruction: string;
     lock: boolean;
     dirty: boolean;
-    // set for a PAGE/NUMPAGES/SECTIONPAGES simple field (see WmlRun.fieldValue)
+    // set for a PAGE/NUMPAGES/SECTIONPAGES/PAGEREF/REF simple field (see WmlRun.fieldValue)
     fieldValue?: string;
+    fieldArg?: string;
 }
