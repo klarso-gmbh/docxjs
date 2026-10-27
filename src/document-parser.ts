@@ -346,6 +346,8 @@ export class DocumentParser {
 						values: this.parseDefaultProperties(n, {})
 					});
 					result.paragraphProps = parseParagraphProperties(n, xml);
+					// a copy: merging with the base style writes into these entries
+					result.tabs = result.paragraphProps.tabs?.map(t => ({ ...t }));
 					break;
 
 				case "rPr":

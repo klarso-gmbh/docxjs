@@ -2,6 +2,7 @@ import { WordDocument } from './word-document';
 import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { positionAnchoredFrames, pinSheetHeights } from './measured-pagination';
+import { resolveTabStops, defaultTabPoints } from './tab-stops';
 import { h } from './html';
 
 export interface Options {
@@ -73,6 +74,11 @@ export interface Options {
     // Generated content is not text, so a page that reads the text from the
     // DOM (the Klarso PDF converter) needs this. Off by default.
     numberingAsText?: boolean;
+    // Under measuredPagination, lay each tab out on its paragraph's tab stops
+    // (its style's and its own) the way Word does - left, right and centred
+    // stops, the default stops past the last one, leaders - instead of one em
+    // space (see tab-stops.ts). Off by default.
+    tabStops?: boolean;
     h: typeof h;
 }
 
@@ -103,6 +109,7 @@ export const defaultOptions: Options = {
     justificationShrink: 0.4,
     explicitSingleLines: false,
     numberingAsText: false,
+    tabStops: false,
     h: h
 };
 
@@ -135,6 +142,10 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
     // is only measurable once the pages are attached. (The even/odd padding swap
     // itself happens during render, in createPageElement.)
     if (userOptions?.measuredPagination) {
+        // the tabs once more on the final pages: filled fields - a table of
+        // contents' page numbers - may have changed the text a stop aligns
+        if (userOptions.tabStops)
+            resolveTabStops(bodyContainer, defaultTabPoints(doc.settingsPart?.settings));
         positionAnchoredFrames(bodyContainer, doc.settingsPart?.settings);
         // last: the anchors are measured against the sheet as laid out
         pinSheetHeights(bodyContainer);

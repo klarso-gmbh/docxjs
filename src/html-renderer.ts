@@ -9,7 +9,7 @@ import {
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
-import { WmlParagraph } from './document/paragraph';
+import { WmlParagraph, ParagraphTab } from './document/paragraph';
 import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
@@ -29,6 +29,7 @@ import {
 	assignModelIndices, applyMeasuredGeometry, findMeasuredBreaks, applyBreaksToModel,
 	resolveBreaksToDocument, hyphenateModel, getAutoLineMul, removeSavedPageBreaks
 } from './measured-pagination';
+import { tabStopsAttr, resolveTabStops, defaultTabPoints } from './tab-stops';
 
 interface CellPos {
 	col: number;
@@ -502,6 +503,9 @@ export class HtmlRenderer {
 				? -Math.abs(this.options.justificationShrink) : undefined;
 			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink,
 				this.options.explicitSingleLines);
+			// tabs move text, so they are laid out before lines are counted
+			if (this.options.tabStops)
+				resolveTabStops(host, defaultTabPoints(settings));
 
 			const breaks = findMeasuredBreaks(host, markersRemoved);
 			// expose the breaks addressed against the original document BEFORE
@@ -1423,7 +1427,10 @@ section.${c}>footer { z-index: 0; }
 			result.classList.add(this.processStyleName(styleName));
 
 		const style = this.findStyle(styleName);
-		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
+		// tabStops reads the style chain itself (paragraphTabs): elem.tabs stays
+		// the paragraph's own stops
+		if (!this.options.tabStops)
+			elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
 
 		// a continuation of a paragraph split at a measured page break must not
 		// repeat its number nor re-increment the numbering counter
@@ -1662,7 +1669,12 @@ section.${c}>footer { z-index: 0; }
 	renderTab(elem: OpenXmlElement) {
 		var tabSpan = this.h({ tagName: "span", children: ["\u2003"] }) as HTMLElement;//"&nbsp;";
 
-		if (this.options.experimental) {
+		if (this.options.tabStops && this.options.measuredPagination) {
+			// laid out on its paragraph's stops once measured (resolveTabStops);
+			// the em space holds its place until then
+			const paragraph = findParent<WmlParagraph>(elem, DomType.Paragraph);
+			tabSpan.setAttribute("data-docx-tab", tabStopsAttr(paragraph ? this.paragraphTabs(paragraph) : []));
+		} else if (this.options.experimental) {
 			tabSpan.className = this.tabStopClass();
 			var stops = findParent<WmlParagraph>(elem, DomType.Paragraph)?.tabs;
 			this.currentTabs.push({ stops, span: tabSpan });
@@ -2054,6 +2066,26 @@ section.${c}>footer { z-index: 0; }
 	   font. */
 	paragraphStyleName(elem: WmlParagraph): string {
 		return elem.styleName ?? this.defaultParagraphStyleId;
+	}
+
+	/* A paragraph's tab stops: its style's, from the base style down, then its
+	   own. A "clear" stop removes the one an earlier level set at that position
+	   (a footer style clearing its base style's centre and right stops). */
+	paragraphTabs(elem: WmlParagraph): ParagraphTab[] {
+		const levels: ParagraphTab[][] = [elem.tabs ?? []];
+		const seen: Record<string, boolean> = {};
+		for (let style = this.findStyle(this.paragraphStyleName(elem)); style && !seen[style.id]; style = this.findStyle(style.basedOn)) {
+			seen[style.id] = true;
+			levels.unshift(style.tabs ?? []);
+		}
+		let stops: ParagraphTab[] = [];
+		for (const level of levels) {
+			for (const t of level) {
+				stops = stops.filter(s => parseFloat(s.position as string) !== parseFloat(t.position as string));
+				if (t.style !== "clear") stops.push(t);
+			}
+		}
+		return stops;
 	}
 
 	numberingDirectClass() {
