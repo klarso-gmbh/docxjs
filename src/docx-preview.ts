@@ -3,6 +3,7 @@ import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { positionAnchoredFrames, pinSheetHeights } from './measured-pagination';
 import { resolveTabStops, defaultTabPoints } from './tab-stops';
+import { addUpParagraphSpacing } from './paragraph-spacing';
 import { h } from './html';
 
 export interface Options {
@@ -79,6 +80,12 @@ export interface Options {
     // stops, the default stops past the last one, leaders - instead of one em
     // space (see tab-stops.ts). Off by default.
     tabStops?: boolean;
+    // Under measuredPagination, in a document that turns HTML paragraph spacing
+    // off (w:doNotUseHTMLParagraphAutoSpacing), add a paragraph's space after to
+    // the next one's space before the way Word does, instead of letting the CSS
+    // margins collapse to the larger one (see paragraph-spacing.ts). Off by
+    // default.
+    addUpParagraphSpacing?: boolean;
     h: typeof h;
 }
 
@@ -110,6 +117,7 @@ export const defaultOptions: Options = {
     explicitSingleLines: false,
     numberingAsText: false,
     tabStops: false,
+    addUpParagraphSpacing: false,
     h: h
 };
 
@@ -142,6 +150,8 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
     // is only measurable once the pages are attached. (The even/odd padding swap
     // itself happens during render, in createPageElement.)
     if (userOptions?.measuredPagination) {
+        if (userOptions.addUpParagraphSpacing && doc.settingsPart?.settings?.doNotUseHTMLParagraphAutoSpacing)
+            addUpParagraphSpacing(bodyContainer);
         // the tabs once more on the final pages: filled fields - a table of
         // contents' page numbers - may have changed the text a stop aligns
         if (userOptions.tabStops)

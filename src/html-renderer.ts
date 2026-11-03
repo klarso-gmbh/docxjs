@@ -30,6 +30,7 @@ import {
 	resolveBreaksToDocument, hyphenateModel, getAutoLineMul, removeSavedPageBreaks
 } from './measured-pagination';
 import { tabStopsAttr, resolveTabStops, defaultTabPoints } from './tab-stops';
+import { addUpParagraphSpacing, PREV_AFTER_RESET } from './paragraph-spacing';
 
 interface CellPos {
 	col: number;
@@ -506,6 +507,9 @@ export class HtmlRenderer {
 			// tabs move text, so they are laid out before lines are counted
 			if (this.options.tabStops)
 				resolveTabStops(host, defaultTabPoints(settings));
+			// Word's space between paragraphs, before the pages are measured
+			if (this.options.addUpParagraphSpacing && settings?.doNotUseHTMLParagraphAutoSpacing)
+				addUpParagraphSpacing(host);
 
 			const breaks = findMeasuredBreaks(host, markersRemoved);
 			// expose the breaks addressed against the original document BEFORE
@@ -964,6 +968,10 @@ section.${c}>footer { z-index: 0; }
 .${c}-comment-author,.${c}-comment-date { font-size: 0.875rem; color: #888; }
 `
 		};
+
+		if (this.options.addUpParagraphSpacing) {
+			styleText += `.${c} ${PREV_AFTER_RESET}\n`;
+		}
 
 		return [
 			this.h({ tagName: "#comment", children: ["docxjs library predefined styles"] }),
