@@ -88,6 +88,28 @@ export function assignModelIndices(body: DocumentElement): Map<number, OpenXmlEl
 	return map;
 }
 
+/* Removes the lastRenderedPageBreak markers the document was saved with. They
+   record where the application that last saved it broke the pages - with that
+   machine's fonts and settings - and Word does not follow them either: it lays
+   the pages out anew on open. Returns how many were removed. */
+export function removeSavedPageBreaks(body: DocumentElement): number {
+	let removed = 0;
+	const walk = (el: OpenXmlElement) => {
+		if (!el.children) return;
+		for (let i = el.children.length - 1; i >= 0; i--) {
+			const c = el.children[i];
+			if (c.type == DomType.Break && (c as WmlBreak).break == "lastRenderedPageBreak") {
+				el.children.splice(i, 1);
+				removed++;
+			} else {
+				walk(c);
+			}
+		}
+	};
+	walk(body);
+	return removed;
+}
+
 // ===========================================================================
 // 2. Geometry - Word line metrics + justified shrink, measured once per font.
 // ===========================================================================
@@ -151,10 +173,11 @@ export function applyMeasuredGeometry(
 	hfPartsByPath: Record<string, OpenXmlElement>,
 	settings: WmlSettings,
 	lineMul: number | null,
-	shrink: number = JUSTIFY_SHRINK_DEFAULT
+	shrink: number = JUSTIFY_SHRINK_DEFAULT,
+	explicitSingleLines: boolean = false
 ) {
 	const justifyShrink = !!(settings && settings.compatibilityMode >= 15);
-	if (!lineMul && !justifyShrink) return;
+	if (!lineMul && !justifyShrink && !explicitSingleLines) return;
 
 	const cache: Record<string, number> = {};
 	// Probe the font's natural line as a ratio of the em size by INHERITANCE
@@ -217,7 +240,7 @@ export function applyMeasuredGeometry(
 	const hfMap = buildHeaderFooterMap(host, hfPartsByPath);
 
 	// pass A: resolve every paragraph's face and probe where possible
-	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; spaceKey: string | null; biasKey: string; italic: boolean; }
+	interface Item { p: HTMLElement; model: OpenXmlElement; size: number; family: string; hasOwnLine: boolean; lineMul: number | null; spaceKey: string | null; biasKey: string; italic: boolean; }
 	const items: Item[] = [];
 	const faceOfFamily: Record<string, Record<string, boolean>> = {};
 	const paras = host.querySelectorAll<HTMLElement>("section.docx p");
@@ -239,7 +262,13 @@ export function applyMeasuredGeometry(
 		// an inline line-height is a document rule (exact/atLeast) - keep it,
 		// but justified spaces still shrink in Word
 		const hasOwnLine = !!p.style.lineHeight;
-		const span = p.querySelector("span");
+		// no rule reaches the paragraph (none in docDefaults, its style or
+		// itself): Word lays it out single, the engine computes "normal" from
+		// font metrics rounded to whole pixels - on request, set it explicitly
+		const itemLineMul = lineMul
+			|| (explicitSingleLines && getComputedStyle(p).lineHeight === "normal" ? 1 : null);
+		// the paragraph's own text, not a numbering label (numberingAsText)
+		const span = p.querySelector<HTMLElement>("span:not([data-docx-num-label])");
 		const cs = getComputedStyle(span || p);
 		const faceKey = cs.fontFamily + "|" + cs.fontWeight + "|" + cs.fontStyle;
 		if (!hasOwnLine) {
@@ -251,7 +280,7 @@ export function applyMeasuredGeometry(
 		const size = parseFloat(cs.fontSize);
 		const biasKey = "bias:" + faceKey + "|" + size;
 		probeAdvanceBias(biasKey, span || p, size);
-		items.push({ p, model, size, family: cs.fontFamily, hasOwnLine,
+		items.push({ p, model, size, family: cs.fontFamily, hasOwnLine, lineMul: itemLineMul,
 			spaceKey: shrink ? "sp:" + faceKey : null, biasKey,
 			italic: cs.fontStyle === "italic" || cs.fontStyle === "oblique" });
 	}
@@ -270,8 +299,8 @@ export function applyMeasuredGeometry(
 	for (const it of items) {
 		const css = (it.model.cssStyle = it.model.cssStyle || {});
 		if (!it.hasOwnLine) {
-			if (lineMul) {
-				const lh = (lineMul * it.size * familyRatio[it.family]).toFixed(2) + "px";
+			if (it.lineMul) {
+				const lh = (it.lineMul * it.size * familyRatio[it.family]).toFixed(2) + "px";
 				css["line-height"] = lh;
 				it.p.style.lineHeight = lh;
 			}
@@ -312,7 +341,7 @@ export function applyMeasuredGeometry(
 		//       nLineWidth -= nPorHeight / 12;                (sw/.../text/guess.cxx)
 		// so an italic line wraps a word earlier than its advances alone would.
 		if (it.italic) {
-			const pad = (it.size * (lineMul ? lineMul * familyRatio[it.family] : 1.2) / 12).toFixed(2) + "px";
+			const pad = (it.size * (it.lineMul ? it.lineMul * familyRatio[it.family] : 1.2) / 12).toFixed(2) + "px";
 			css["padding-right"] = pad;
 			it.p.style.paddingRight = pad;
 		}
@@ -516,6 +545,10 @@ function atomsOf(el: HTMLElement): (Text | Element)[] {
 	const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
 		acceptNode(n: Node) {
 			if (n.nodeType === 3) return (n as Text).nodeValue.length ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
+			// a numbering label (numberingAsText) is not paragraph text: break
+			// offsets count the model's characters, and the label sits in the
+			// first line like the CSS marker it replaces
+			if ((n as Element).hasAttribute("data-docx-num-label")) return NodeFilter.FILTER_REJECT;
 			return (n as Element).tagName === "IMG" ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_SKIP;
 		}
 	});
@@ -817,20 +850,26 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 	return sheet;
 }
 
-function needsPagination(section: HTMLElement, geo: { target: number }): boolean {
-	const tolerance = Math.max(24, geo.target * 0.05);
+/* A sheet the document's own saved page breaks delimit is left alone while it
+   overflows by less than a tolerance. Once those breaks are removed, every
+   sheet comes from the measurement alone, so any overflow is a page Word turns
+   too: left alone, the sheet keeps the content, and the fixed-height page
+   squeezes its header and footer over the body. */
+function needsPagination(section: HTMLElement, geo: { target: number }, exact: boolean): boolean {
+	const tolerance = exact ? EPS : Math.max(24, geo.target * 0.05);
 	return section.getBoundingClientRect().height > geo.target + tolerance;
 }
 
 /* Runs the measured paginator over the host and returns the model break
-   descriptors (the DOM is mutated in place - that host is discarded). */
-export function findMeasuredBreaks(host: HTMLElement): BreakDesc[] {
+   descriptors (the DOM is mutated in place - that host is discarded).
+   `exact`: the saved page breaks were removed (see needsPagination). */
+export function findMeasuredBreaks(host: HTMLElement, exact = false): BreakDesc[] {
 	const ctx: PaginateCtx = { breaks: [], record(d) { this.breaks.push(d); } };
 	const originals = Array.prototype.slice.call(host.querySelectorAll("section.docx")) as HTMLElement[];
 	let safety = SAFETY_MAX_SHEETS;
 	for (const orig of originals) {
 		const geo = sheetGeometry(orig);
-		if (!geo.target || !needsPagination(orig, geo)) continue;
+		if (!geo.target || !needsPagination(orig, geo, exact)) continue;
 		let sheet: HTMLElement = orig;
 		while (sheet && safety-- > 0) sheet = paginateSheet(sheet, geo, ctx);
 	}
@@ -852,13 +891,15 @@ interface Atom { kind: "text" | "slot"; topChild: OpenXmlElement; leaf: OpenXmlE
 
 /* Flattens a paragraph's break atoms in document order, recording for each its
    direct paragraph child (the level splitBySection acts on) and start offset.
-   Skips runs the renderer drops (field code, deleted text). */
+   Skips runs the renderer drops (field code, further field result runs,
+   deleted text). */
 function paragraphAtoms(p: WmlParagraph): { atoms: Atom[]; total: number } {
 	const atoms: Atom[] = [];
 	let pos = 0;
 	for (const topChild of p.children ?? []) {
 		const visit = (el: OpenXmlElement) => {
-			if (el.type == DomType.Run && ((el as WmlRun).fieldRun || (el as WmlRun).fieldCodeContent)) return;
+			if (el.type == DomType.Run && ((el as WmlRun).fieldRun || (el as WmlRun).fieldCodeContent
+				|| (el as WmlRun).fieldResultRest)) return;
 			if (el.type == DomType.DeletedText) return; // renderChanges off in this path
 			if (el.type == DomType.Text) {
 				const len = (el as WmlText).text?.length ?? 0;

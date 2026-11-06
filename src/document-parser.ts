@@ -121,15 +121,22 @@ export class DocumentParser {
 	// Word displays only a complex field's result segment (separate..end); everything
 	// between begin and separate is field code. Mark content runs inside any code
 	// segment so the renderer can skip them like Word does. Additionally tag the
-	// result run of a PAGE/NUMPAGES/SECTIONPAGES field (simple or complex) with
-	// fieldValue so measured pagination can fill the live per-page value. Must run
+	// result of a PAGE/NUMPAGES/SECTIONPAGES/PAGEREF/REF field (simple or complex)
+	// with fieldValue so measured pagination can fill the live value. Must run
 	// once per story (body, each header/footer, each note) since fields may span
 	// paragraphs.
 	processFieldSegments(children: OpenXmlElement[]) {
-		type Frame = { code: boolean; instr: string; keyword: string | null };
-		const keywordOf = (instr: string): string | null => {
-			const m = /^\s*(PAGE|NUMPAGES|SECTIONPAGES)\b/.exec(instr || "");
-			return m ? m[1] : null;
+		type Field = { keyword: string; arg?: string };
+		type Frame = { code: boolean; instr: string; field: Field | null; tagged: boolean };
+		// PAGEREF gives the page of a bookmark; REF only when it asks for the
+		// number of the bookmarked paragraph (\n, \r, \w) - its other forms copy
+		// the bookmarked text, which the cached result already shows
+		const fieldOf = (instr: string): Field | null => {
+			let m = /^\s*(PAGE|NUMPAGES|SECTIONPAGES)\b/.exec(instr || "");
+			if (m) return { keyword: m[1] };
+			m = /^\s*(PAGEREF|REF)\s+"?([^\s"\\]+)"?(.*)$/.exec(instr || "");
+			if (!m || (m[1] === "REF" && !/\\[nrw]\b/.test(m[3]))) return null;
+			return { keyword: m[1], arg: m[2] };
 		};
 		var codeDepth = 0;
 		var stack: Frame[] = []; // per open field: code/result state + instruction
@@ -139,8 +146,12 @@ export class DocumentParser {
 				if (el.type === DomType.SimpleField) {
 					// simple field: instruction is an attribute, result is its
 					// children (rendered by renderSimpleField)
-					const kw = keywordOf((el as WmlFieldSimple).instruction);
-					if (kw) (el as WmlFieldSimple).fieldValue = kw;
+					const sf = el as WmlFieldSimple;
+					const field = fieldOf(sf.instruction);
+					if (field) {
+						sf.fieldValue = field.keyword;
+						sf.fieldArg = field.arg;
+					}
 					continue;
 				}
 				if (el.type === DomType.Run) {
@@ -151,14 +162,14 @@ export class DocumentParser {
 							if (c.type === DomType.ComplexField) {
 								switch ((c as WmlFieldChar).charType) {
 									case "begin":
-										stack.push({ code: true, instr: "", keyword: null });
+										stack.push({ code: true, instr: "", field: null, tagged: false });
 										codeDepth++;
 										break;
 									case "separate":
 										if (stack.length && stack[stack.length - 1].code) {
 											const f = stack[stack.length - 1];
 											f.code = false;
-											f.keyword = keywordOf(f.instr);
+											f.field = fieldOf(f.instr);
 											codeDepth--;
 										}
 										break;
@@ -175,9 +186,18 @@ export class DocumentParser {
 					} else if (codeDepth > 0) {
 						run.fieldCodeContent = true;
 					} else {
-						// result segment: tag the innermost field's value run
+						// result segment: the innermost field's first result run
+						// carries the value, any further one gives way to it
 						const f = stack[stack.length - 1];
-						if (f && !f.code && f.keyword) run.fieldValue = f.keyword;
+						if (f && !f.code && f.field) {
+							if (f.tagged) {
+								run.fieldResultRest = true;
+							} else {
+								run.fieldValue = f.field.keyword;
+								run.fieldArg = f.field.arg;
+								f.tagged = true;
+							}
+						}
 					}
 				} else if (el.children?.length) {
 					walk(el.children);
@@ -326,6 +346,8 @@ export class DocumentParser {
 						values: this.parseDefaultProperties(n, {})
 					});
 					result.paragraphProps = parseParagraphProperties(n, xml);
+					// a copy: merging with the base style writes into these entries
+					result.tabs = result.paragraphProps.tabs?.map(t => ({ ...t }));
 					break;
 
 				case "rPr":
@@ -540,6 +562,10 @@ export class DocumentParser {
 
 				case "suff":
 					result.suff = xml.attr(n, "val");
+					break;
+
+				case "lvlRestart":
+					result.restart = xml.intAttr(n, "val");
 					break;
 			}
 		}
@@ -1102,8 +1128,13 @@ export class DocumentParser {
 			// page. Absolute also anchors the drawing by its top edge at the
 			// anchor offset (matching Word), instead of baseline-aligning its
 			// bottom there, and is not clipped by the anchor's zero box.
-			for (const child of result.children)
+			// behindDoc is Word's "behind text": an absolutely positioned box
+			// paints over the text, so such a drawing goes below it.
+			for (const child of result.children) {
 				(child.cssStyle ??= {})["position"] = "absolute";
+				if (behindDoc)
+					child.cssStyle["z-index"] = "-1";
+			}
 		}
 		else if (isAnchor && (posX.align == 'left' || posX.align == 'right')) {
 			result.cssStyle["float"] = posX.align;
@@ -1178,6 +1209,12 @@ export class DocumentParser {
 			switch (c.localName) {
 				case "tr":
 					result.children.push(this.parseTableRow(c));
+					break;
+
+				// a content control around rows (a repeating section): its rows
+				// belong to the table
+				case "sdt":
+					result.children.push(...this.parseSdt(c, e => this.parseTable(e).children));
 					break;
 
 				case "tblGrid":
@@ -1281,6 +1318,12 @@ export class DocumentParser {
 					result.children.push(this.parseTableCell(c));
 					break;
 
+				// a content control around cells (a form field filling a cell):
+				// its cells belong to the row
+				case "sdt":
+					result.children.push(...this.parseSdt(c, e => this.parseTableRow(e).children));
+					break;
+
 				case "trPr":
 				case "tblPrEx":
 					this.parseTableRowProperties(c, result);
@@ -1336,6 +1379,11 @@ export class DocumentParser {
 
 				case "p":
 					result.children.push(this.parseParagraph(c));
+					break;
+
+				// a content control around paragraphs or tables of the cell
+				case "sdt":
+					result.children.push(...this.parseSdt(c, e => this.parseBodyElements(e)));
 					break;
 
 				case "tcPr":
@@ -1518,8 +1566,9 @@ export class DocumentParser {
 
 				case "pBdr":
 					this.parseBorderProperties(c, style);
-					// the spacing is applied once every property is known, see
-					// parseParagraphProperties - it has to compose with the indent
+					this.parseParagraphBorderPadding(c, style);
+					// the left/right spacing is applied once every property is known,
+					// see parseParagraphProperties - it has to compose with the indent
 					break;
 
 				case "bdr":
@@ -1805,6 +1854,24 @@ export class DocumentParser {
 
 			style[`margin-inline-${logical}`] = `calc(${base} - ${offset.toFixed(2)}pt)`;
 			style[`padding-${side}`] = space;
+		}
+	}
+
+	// Word keeps w:space points between a top or bottom paragraph border and
+	// the text, and the paragraph grows by them (the border's own width is
+	// part of the CSS box already). Unlike left/right this moves nothing
+	// sideways, so it needs no indent and holds for a style's borders too.
+	parseParagraphBorderPadding(node: Element, style: Record<string, string>) {
+		for (const side of ["top", "bottom"]) {
+			const el = xml.element(node, side);
+
+			if (!el || values.parseBorderType(xml.attr(el, "val")) == "none")
+				continue;
+
+			const space = xml.lengthAttr(el, "space", LengthUsage.Point);
+
+			if (space)
+				style[`padding-${side}`] = space;
 		}
 	}
 

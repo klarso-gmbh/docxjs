@@ -9,11 +9,11 @@ import {
 } from './document/dom';
 import { Options } from './docx-preview';
 import { DocumentElement } from './document/document';
-import { WmlParagraph } from './document/paragraph';
+import { WmlParagraph, ParagraphTab } from './document/paragraph';
 import { asArray, encloseFontFamily, escapeClassName, isString, keyBy, mergeDeep } from './utils';
 import { computePixelToPoint, updateTabStop } from './javascript';
 import { FontTablePart } from './font-table/font-table';
-import { FooterHeaderReference, SectionProperties } from './document/section';
+import { FooterHeaderReference, SectionProperties, SectionType } from './document/section';
 import { WmlRun } from './document/run';
 import { WmlFieldSimple } from './document/fields';
 import { WmlBookmarkStart } from './document/bookmarks';
@@ -27,8 +27,10 @@ import { WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
 import {
 	assignModelIndices, applyMeasuredGeometry, findMeasuredBreaks, applyBreaksToModel,
-	resolveBreaksToDocument, hyphenateModel, getAutoLineMul
+	resolveBreaksToDocument, hyphenateModel, getAutoLineMul, removeSavedPageBreaks
 } from './measured-pagination';
+import { tabStopsAttr, resolveTabStops, defaultTabPoints } from './tab-stops';
+import { addUpParagraphSpacing, PREV_AFTER_RESET } from './paragraph-spacing';
 
 interface CellPos {
 	col: number;
@@ -52,6 +54,13 @@ export class HtmlRenderer {
 	document: WordDocument;
 	options: Options;
 	styleMap: Record<string, IDomStyle> = {};
+	// the default paragraph style (w:default="1"), which formats every
+	// paragraph without a w:pStyle
+	defaultParagraphStyleId: string = null;
+	// numberingAsText: the levels of every w:num by level, and the running
+	// count of each (reset per render pass)
+	numberingLevels: Record<string, Record<number, IDomNumbering>> = {};
+	numberingCounters: Record<string, number[]> = {};
 	currentPart: Part = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
@@ -75,6 +84,13 @@ export class HtmlRenderer {
 	measuredMiMap: Map<number, OpenXmlElement> = null;
 	currentPageIndex = 0;
 	hfPartsByPath: Record<string, OpenXmlElement> = {};
+	// the document's saved page breaks were removed (ignoreLastRenderedPageBreak
+	// under measured pagination): section starts are then the renderer's to
+	// break, see sectionStartsPage
+	savedBreaksRemoved = false;
+	// measured pagination: the section of each data-docx-sect index, for the
+	// page numbers fillPageFields writes
+	sectionsByIndex: SectionProperties[] = [];
 
 	defaultTabSize: string;
 	currentTabs: any[] = [];
@@ -93,6 +109,9 @@ export class HtmlRenderer {
 		this.rootSelector = options.inWrapper ? `.${this.className}-wrapper` : ':root';
 		this.h = options.h ?? h;
 		this.styleMap = null;
+		this.defaultParagraphStyleId = null;
+		this.savedBreaksRemoved = false;
+		this.numberingLevels = {};
 		this.tasks = [];
 
 		if (this.options.renderComments && globalThis.Highlight) {
@@ -107,15 +126,27 @@ export class HtmlRenderer {
 
 		if (document.stylesPart != null) {
 			this.styleMap = this.processStyles(document.stylesPart.styles);
-			result.push(...this.renderStyles(document.stylesPart.styles));
+			this.defaultParagraphStyleId = document.stylesPart.styles.find(s => s.isDefault && s.target == "p")?.id ?? null;
 		}
 
+		// numbering rules go BEFORE the style rules: ECMA-376 17.7.2 applies the
+		// numbering a style brings, then the paragraph style, then the direct
+		// formatting - numbering in the paragraph's own properties included. Of
+		// two equally specific rules the later one wins, so a style beats the
+		// numbering it brings itself: a Ril "a)" item is indented by its style
+		// (709/284 twips), not by its level (1020/510). Numbering of the
+		// paragraph's own gets a more specific rule (see renderNumbering).
 		if (document.numberingPart) {
 			this.prodessNumberings(document.numberingPart.domNumberings);
+			for (const num of document.numberingPart.domNumberings)
+				(this.numberingLevels[num.id] ??= {})[num.level] = num;
 
 			result.push(...await this.renderNumbering(document.numberingPart.domNumberings));
 			//result.push(...await this.renderNumbering2(document.numberingPart.domNumberings));
 		}
+
+		if (document.stylesPart != null)
+			result.push(...this.renderStyles(document.stylesPart.styles));
 
 		if (document.footnotesPart) {
 			this.footnoteMap = keyBy(document.footnotesPart.notes, x => x.id);
@@ -352,12 +383,15 @@ export class HtmlRenderer {
 
 	renderSections(document: DocumentElement): HTMLElement[] {
 		const result = [];
+		// every render pass numbers the document from its start
+		this.numberingCounters = {};
 
 		this.processElement(document);
 		const sections = this.splitBySection(document.children, document.props);
 		const pages = this.groupByPageBreaks(sections);
 		let prevProps = null;
 		const sectIndex = new Map<SectionProperties, number>();
+		this.sectionsByIndex = [];
 
 		for (let i = 0, l = pages.length; i < l; i++) {
 			this.currentFootnoteIds = [];
@@ -370,17 +404,28 @@ export class HtmlRenderer {
 			// stamp the Word section index (pages of one section share sectProps)
 			// so a consumer's page-number stamper can count SECTIONPAGES
 			if (this.options.measuredPagination) {
-				if (!sectIndex.has(props)) sectIndex.set(props, sectIndex.size);
+				if (!sectIndex.has(props)) {
+					sectIndex.set(props, sectIndex.size);
+					this.sectionsByIndex.push(props);
+				}
 				pageElement.setAttribute("data-docx-sect", String(sectIndex.get(props)));
 			}
 
 			this.options.renderHeaders && this.renderHeaderFooter(props.headerRefs, props,
 				result.length, prevProps != props, pageElement);
 
+			let contentElement: Node = null;
 			for (const sect of pages[i]) {
-				var contentElement = this.createSectionContent(sect.sectProps);
-				this.renderElements(sect.elements, contentElement);
-				pageElement.appendChild(contentElement);
+				// measured pagination paginates a sheet's first article only: once
+				// the saved page breaks are gone, a continuous section in the same
+				// columns continues in that article, as its text does in Word
+				if (contentElement && this.savedBreaksRemoved && this.sameColumns(props, sect.sectProps)) {
+					this.renderElements(sect.elements, contentElement);
+				} else {
+					contentElement = this.createSectionContent(sect.sectProps);
+					this.renderElements(sect.elements, contentElement);
+					pageElement.appendChild(contentElement);
+				}
 				props = sect.sectProps;
 			}
 
@@ -416,8 +461,14 @@ export class HtmlRenderer {
 
 		// measured pagination expresses breaks as lastRenderedPageBreak markers,
 		// so both passes must honor them (and pass 1 must group the doc into as few
-		// sheets as its own breaks dictate, then measure the overflow)
+		// sheets as its own breaks dictate, then measure the overflow). A caller
+		// that ignores the document's own markers has them removed first, so the
+		// pages follow the measurement alone.
+		const markersRemoved = this.options.ignoreLastRenderedPageBreak;
+		if (markersRemoved)
+			removeSavedPageBreaks(body);
 		this.options.ignoreLastRenderedPageBreak = false;
+		this.savedBreaksRemoved = markersRemoved;
 
 		// hyphenate the model text (both passes see the same soft hyphens)
 		if (this.options.hyphenate && settings?.autoHyphenation) {
@@ -451,9 +502,16 @@ export class HtmlRenderer {
 			const lineMul = getAutoLineMul(wordDoc);
 			const shrink = this.options.justificationShrink != null
 				? -Math.abs(this.options.justificationShrink) : undefined;
-			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink);
+			applyMeasuredGeometry(host, this.measuredMiMap, this.hfPartsByPath, settings, lineMul, shrink,
+				this.options.explicitSingleLines);
+			// tabs move text, so they are laid out before lines are counted
+			if (this.options.tabStops)
+				resolveTabStops(host, defaultTabPoints(settings));
+			// Word's space between paragraphs, before the pages are measured
+			if (this.options.addUpParagraphSpacing && settings?.doNotUseHTMLParagraphAutoSpacing)
+				addUpParagraphSpacing(host);
 
-			const breaks = findMeasuredBreaks(host);
+			const breaks = findMeasuredBreaks(host, markersRemoved);
 			// expose the breaks addressed against the original document BEFORE
 			// applyBreaksToModel mutates the paragraphs (offsets still line up)
 			if (this.options.onMeasuredBreaks) {
@@ -712,7 +770,7 @@ export class HtmlRenderer {
 			}
 
 			if (elem.type == DomType.Paragraph && !(elem as any).$splitCont) {
-				const s = this.findStyle((elem as WmlParagraph).styleName);
+				const s = this.findStyle(this.paragraphStyleName(elem as WmlParagraph));
 
 				if (s?.paragraphProps?.pageBreakBefore) {
 					current.sectProps = sectProps;
@@ -838,16 +896,36 @@ export class HtmlRenderer {
 		let prev: SectionProperties;
 		const result: Section[][] = [current];
 
-		for (let s of sections) {
+		for (let i = 0; i < sections.length; i++) {
+			const s = sections[i];
 			current.push(s);
 
-			if (this.options.ignoreLastRenderedPageBreak || s.pageBreak || this.isPageBreakSection(prev, s.sectProps))
+			if (this.options.ignoreLastRenderedPageBreak || s.pageBreak || this.isPageBreakSection(prev, s.sectProps)
+				|| this.sectionStartsPage(s, sections[i + 1]))
 				result.push(current = []);
 
 			prev = s.sectProps;
 		}
 
 		return result.filter(x => x.length > 0);
+	}
+
+	/* Whether the Word section that follows `s` starts on a new page. Word starts
+	   every section on a new page except a continuous one on the same page size
+	   (nextPage is the default; evenPage and oddPage may add a blank page, which
+	   is not reproduced). A document Word saved has a lastRenderedPageBreak at
+	   the top of such a page, which breaks it here; once those markers are
+	   removed, the section's type has to. */
+	sectionStartsPage(s: Section, next: Section): boolean {
+		return this.savedBreaksRemoved && !!next && next.sectProps !== s.sectProps
+			&& (next.sectProps?.type !== SectionType.Continuous || this.isPageBreakSection(s.sectProps, next.sectProps));
+	}
+
+	// the same column layout - all of a section that createSectionContent uses
+	sameColumns(a: SectionProperties, b: SectionProperties): boolean {
+		const cols = (p: SectionProperties) => (p?.columns?.numberOfColumns ?? 1) > 1
+			? `${p.columns.numberOfColumns}|${p.columns.space}|${!!p.columns.separator}` : "1";
+		return cols(a) === cols(b);
 	}
 
 	renderWrapper(children: HTMLElement[]) {
@@ -890,6 +968,10 @@ section.${c}>footer { z-index: 0; }
 .${c}-comment-author,.${c}-comment-date { font-size: 0.875rem; color: #888; }
 `
 		};
+
+		if (this.options.addUpParagraphSpacing) {
+			styleText += `.${c} ${PREV_AFTER_RESET}\n`;
+		}
 
 		return [
 			this.h({ tagName: "#comment", children: ["docxjs library predefined styles"] }),
@@ -1021,14 +1103,15 @@ section.${c}>footer { z-index: 0; }
 				// tab stop sits at the paragraph's left indent - the marker box
 				// spans exactly the hanging width (= negative text-indent);
 				// otherwise fall back to one default tab stop.
+				var directMinWidth: string = null;
 				if (num.suff == null || num.suff == "tab") {
-					var hangingIndent = num.pStyle?.["text-indent"];
+					// the hanging indent the paragraph really gets: its linked
+					// style's own beats the level's (the style rules win, see
+					// render) - but not in a paragraph numbered by its own w:numPr
+					var linkedPara = linkedStyle?.styles?.find(s => s.target == "p")?.values;
 					beforeValues["display"] = "inline-block";
-					// levels declaring hanging="0" parse to "-0.00pt" - only a
-					// real (negative) hanging indent replaces the default stop
-					beforeValues["min-width"] = (hangingIndent && parseFloat(hangingIndent) < 0)
-						? hangingIndent.substring(1)
-						: (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
+					beforeValues["min-width"] = this.markerWidth(linkedPara?.["text-indent"] ?? num.pStyle?.["text-indent"]);
+					directMinWidth = this.markerWidth(num.pStyle?.["text-indent"]);
 					// baseline-aligned inline-blocks inflate the line box by
 					// their descent; top keeps the marker's internal baseline
 					// on the text baseline (same font/line-height) without that
@@ -1040,7 +1123,19 @@ section.${c}>footer { z-index: 0; }
 					beforeValues["text-indent"] = "0";
 				}
 
-				styleText += this.styleToString(`${selector}:before`, beforeValues);
+				// numberingAsText: the same box around a real text span the
+				// paragraph renders itself - no generated content, no CSS counter
+				if (this.options.numberingAsText) {
+					const labelValues = { ...beforeValues };
+					delete labelValues["content"];
+					delete labelValues["counter-increment"];
+					styleText += this.styleToString(`${selector} > [data-docx-num-label]`, labelValues);
+				} else {
+					styleText += this.styleToString(`${selector}:before`, beforeValues);
+				}
+				if (directMinWidth && directMinWidth != beforeValues["min-width"])
+					styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}`
+						+ (this.options.numberingAsText ? " > [data-docx-num-label]" : ":before"), { "min-width": directMinWidth });
 			}
 			else {
 				listStyleType = this.numFormatToCssValue(num.format);
@@ -1052,6 +1147,10 @@ section.${c}>footer { z-index: 0; }
 				"list-style-type": listStyleType,
 				...num.pStyle
 			});
+			// numbering of the paragraph's own comes with its direct formatting,
+			// after its style (ECMA-376 17.7.2): a rule more specific than the style's
+			if (num.pStyle && Object.keys(num.pStyle).length)
+				styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}`, num.pStyle);
 		}
 
 		if (resetCounters.length > 0) {
@@ -1095,7 +1194,13 @@ section.${c}>footer { z-index: 0; }
 
 			for (const subStyle of subStyles) {
 				//TODO temporary disable modificators until test it well
-				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''} 
+				var selector = `${style.target ?? ''}.${style.cssName}`; //${subStyle.mod ?? ''}
+
+				// a character style beats the run properties of the default
+				// paragraph style, which every paragraph without a w:pStyle carries
+				// too (p.<default> span) - in Word the run's own style wins
+				if (style.target == "span" && defautStyles["p"])
+					selector += `, p.${defautStyles["p"].cssName} ${selector}`;
 
 				if (style.target != subStyle.target)
 					selector += ` ${subStyle.target}`;
@@ -1323,8 +1428,17 @@ section.${c}>footer { z-index: 0; }
 	renderParagraph(elem: WmlParagraph) {
 		var result = this.toHTML(elem, ns.html, "p");
 
-		const style = this.findStyle(elem.styleName);
-		elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
+		// without a w:pStyle of its own the paragraph gets the default style's
+		// class too: its run properties apply to the paragraph's spans
+		const styleName = this.paragraphStyleName(elem);
+		if (styleName && !elem.styleName)
+			result.classList.add(this.processStyleName(styleName));
+
+		const style = this.findStyle(styleName);
+		// tabStops reads the style chain itself (paragraphTabs): elem.tabs stays
+		// the paragraph's own stops
+		if (!this.options.tabStops)
+			elem.tabs ??= style?.paragraphProps?.tabs;  //TODO
 
 		// a continuation of a paragraph split at a measured page break must not
 		// repeat its number nor re-increment the numbering counter
@@ -1334,6 +1448,19 @@ section.${c}>footer { z-index: 0; }
 
 		if (numbering) {
 			result.classList.add(this.numberingClass(numbering.id, numbering.level));
+			// numbered by its own w:numPr, not by its style: the level's paragraph
+			// properties beat the style's (see renderNumbering)
+			if (numbering === elem.numbering)
+				result.classList.add(this.numberingDirectClass());
+
+			// numberingAsText: the label as the paragraph's first span, styled
+			// by the marker rule renderNumbering writes for it
+			const label = this.options.numberingAsText ? this.numberingLabel(numbering.id, numbering.level) : null;
+			if (label != null) {
+				const span = this.h({ tagName: "span", children: [label] }) as HTMLElement;
+				span.setAttribute("data-docx-num-label", "");
+				result.insertBefore(span, result.firstChild);
+			}
 		}
 
 		if (this.options.measuredPagination && (elem as any).$mi != null)
@@ -1550,7 +1677,12 @@ section.${c}>footer { z-index: 0; }
 	renderTab(elem: OpenXmlElement) {
 		var tabSpan = this.h({ tagName: "span", children: ["\u2003"] }) as HTMLElement;//"&nbsp;";
 
-		if (this.options.experimental) {
+		if (this.options.tabStops && this.options.measuredPagination) {
+			// laid out on its paragraph's stops once measured (resolveTabStops);
+			// the em space holds its place until then
+			const paragraph = findParent<WmlParagraph>(elem, DomType.Paragraph);
+			tabSpan.setAttribute("data-docx-tab", tabStopsAttr(paragraph ? this.paragraphTabs(paragraph) : []));
+		} else if (this.options.experimental) {
 			tabSpan.className = this.tabStopClass();
 			var stops = findParent<WmlParagraph>(elem, DomType.Paragraph)?.tabs;
 			this.currentTabs.push({ stops, span: tabSpan });
@@ -1566,6 +1698,9 @@ section.${c}>footer { z-index: 0; }
 	renderRun(elem: WmlRun) {
 		if (elem.fieldRun || elem.fieldCodeContent)
 			return null;
+		// the field's first result run shows the whole filled value
+		if (elem.fieldResultRest && this.options.measuredPagination)
+			return null;
 
 		let children = this.renderElements(elem.children);
 
@@ -1578,43 +1713,90 @@ section.${c}>footer { z-index: 0; }
 		if (elem.id)
 			result.id = elem.id;
 
-		// mark PAGE/NUMPAGES/SECTIONPAGES result runs so measured pagination can
-		// fill the live per-page value (see fillPageFields)
+		// mark field result runs so measured pagination can fill the live value
+		// (see fillPageFields)
 		if (elem.fieldValue && this.options.measuredPagination)
-			result.setAttribute("data-docx-field", elem.fieldValue);
+			this.markField(result, elem.fieldValue, elem.fieldArg);
 
 		return result;
 	}
 
-	// A simple field (w:fldSimple). Only PAGE/NUMPAGES/SECTIONPAGES fields are
+	markField(el: HTMLElement, keyword: string, arg: string) {
+		el.setAttribute("data-docx-field", keyword);
+		if (arg) el.setAttribute("data-docx-field-arg", arg);
+	}
+
+	// A simple field (w:fldSimple). Only the fields fillPageFields fills are
 	// rendered, and only under measuredPagination (where the live value can be
 	// computed) - matching the default renderer, which does not render simple
 	// fields at all. The cached result is rendered as a placeholder and then
-	// overwritten per page by fillPageFields.
+	// overwritten by fillPageFields.
 	renderSimpleField(elem: WmlFieldSimple) {
 		if (!elem.fieldValue || !this.options.measuredPagination)
 			return null;
 
 		const result = this.toHTML(elem, ns.html, "span", this.renderElements(elem.children));
-		result.setAttribute("data-docx-field", elem.fieldValue);
+		this.markField(result, elem.fieldValue, elem.fieldArg);
 		return result;
 	}
 
-	// Fills PAGE/NUMPAGES/SECTIONPAGES field placeholders with live values now
-	// that the final pages are known. SECTIONPAGES counts pages sharing a
-	// section (data-docx-sect, stamped per page in measured mode).
+	// Fills PAGE/NUMPAGES/SECTIONPAGES/PAGEREF/REF field placeholders with live
+	// values now that the final pages are known. SECTIONPAGES counts pages
+	// sharing a section (data-docx-sect, stamped per page in measured mode).
+	// PAGEREF shows the page a bookmark starts on, REF the number label of the
+	// bookmarked paragraph (numberingAsText) - both the way a table of contents
+	// uses them. A field whose bookmark is missing keeps its cached result.
+	// PAGE and PAGEREF show the number Word gives a page: numbering runs on
+	// across sections unless one restarts it (w:pgNumType w:start), in each
+	// section's own format (w:fmt); NUMPAGES counts the pages.
 	fillPageFields(pages: HTMLElement[]) {
 		const sectKey = (s: HTMLElement, i: number) => s.getAttribute("data-docx-sect") ?? ("solo" + i);
 		const perSect: Record<string, number> = {};
 		pages.forEach((s, i) => { const k = sectKey(s, i); perSect[k] = (perSect[k] ?? 0) + 1; });
+		const pageNumbers: string[] = [];
+		let pageNumber = 0;
+		pages.forEach((s, i) => {
+			const sect = s.getAttribute("data-docx-sect");
+			const props = this.sectionsByIndex[parseInt(sect, 10)];
+			const start = props?.pageNumber?.start;
+			const restarts = (i == 0 || sect != pages[i - 1].getAttribute("data-docx-sect")) && Number.isInteger(start);
+			pageNumber = restarts ? start : pageNumber + 1;
+			pageNumbers.push(this.formatNumber(pageNumber, props?.pageNumber?.format ?? "decimal"));
+		});
+		// bookmarks render as <span id>; the first occurrence is where one starts,
+		// on the page of the first text after it: a bookmark Word saved in front
+		// of a page's first line stays in the empty paragraph head that the saved
+		// page break leaves on the page before (splitBySection)
+		const textFollows = (b: HTMLElement, page: HTMLElement) => {
+			const walker = document.createTreeWalker(page, NodeFilter.SHOW_TEXT);
+			walker.currentNode = b;
+			for (let n = walker.nextNode(); n; n = walker.nextNode())
+				if (n.nodeValue.trim()) return true;
+			return false;
+		};
+		const bookmarks: Record<string, { el: HTMLElement; page: number }> = {};
+		pages.forEach((s, i) => s.querySelectorAll<HTMLElement>("span[id]").forEach(b => {
+			if (!bookmarks[b.id])
+				bookmarks[b.id] = { el: b, page: (textFollows(b, s) || i == pages.length - 1) ? i : i + 1 };
+		}));
+		const refValue = (keyword: string, arg: string): string | null => {
+			const b = bookmarks[arg];
+			if (!b) return null;
+			if (keyword === "PAGEREF") return pageNumbers[b.page];
+			const label = b.el.closest("p")?.querySelector("[data-docx-num-label]");
+			return label ? label.textContent.trim().replace(/\.+$/, "") : null;
+		};
 		pages.forEach((s, i) => {
 			const vals: Record<string, string> = {
-				PAGE: String(i + 1),
+				PAGE: pageNumbers[i],
 				NUMPAGES: String(pages.length),
 				SECTIONPAGES: String(perSect[sectKey(s, i)])
 			};
 			s.querySelectorAll<HTMLElement>("[data-docx-field]").forEach(el => {
-				const v = vals[el.getAttribute("data-docx-field")];
+				const keyword = el.getAttribute("data-docx-field");
+				const v = el.hasAttribute("data-docx-field-arg")
+					? refValue(keyword, el.getAttribute("data-docx-field-arg"))
+					: vals[keyword];
 				if (v != null) el.textContent = v;
 			});
 		});
@@ -1886,6 +2068,47 @@ section.${c}>footer { z-index: 0; }
 		return styleName && this.styleMap?.[styleName];
 	}
 
+	/* The style a paragraph is formatted with: its w:pStyle, else the default
+	   paragraph style - Word applies that one to every paragraph without a
+	   w:pStyle, so the document defaults alone would put its runs in the wrong
+	   font. */
+	paragraphStyleName(elem: WmlParagraph): string {
+		return elem.styleName ?? this.defaultParagraphStyleId;
+	}
+
+	/* A paragraph's tab stops: its style's, from the base style down, then its
+	   own. A "clear" stop removes the one an earlier level set at that position
+	   (a footer style clearing its base style's centre and right stops). */
+	paragraphTabs(elem: WmlParagraph): ParagraphTab[] {
+		const levels: ParagraphTab[][] = [elem.tabs ?? []];
+		const seen: Record<string, boolean> = {};
+		for (let style = this.findStyle(this.paragraphStyleName(elem)); style && !seen[style.id]; style = this.findStyle(style.basedOn)) {
+			seen[style.id] = true;
+			levels.unshift(style.tabs ?? []);
+		}
+		let stops: ParagraphTab[] = [];
+		for (const level of levels) {
+			for (const t of level) {
+				stops = stops.filter(s => parseFloat(s.position as string) !== parseFloat(t.position as string));
+				if (t.style !== "clear") stops.push(t);
+			}
+		}
+		return stops;
+	}
+
+	numberingDirectClass() {
+		return `${this.className}-num-direct`;
+	}
+
+	// the marker box of a "tab" suffix spans the hanging indent; levels
+	// declaring hanging="0" parse to "-0.00pt" - only a real (negative)
+	// hanging indent replaces the default tab stop
+	markerWidth(hangingIndent: string): string {
+		return (hangingIndent && parseFloat(hangingIndent) < 0)
+			? hangingIndent.substring(1)
+			: (this.document.settingsPart?.settings?.defaultTabStop ?? "36pt");
+	}
+
 	numberingClass(id: string, lvl: number) {
 		return `${this.className}-num-${id}-${lvl}`;
 	}
@@ -1912,6 +2135,66 @@ section.${c}>footer { z-index: 0; }
 
 	numberingCounter(id: string, lvl: number) {
 		return `${this.className}-num-${id}-${lvl}`;
+	}
+
+	/* The label of the next paragraph at this level, counted the way Word
+	   counts: the level goes up by one, every level below it starts over
+	   (unless its w:lvlRestart says otherwise), and each %N in the level text
+	   shows level N's count in level N's own format. Null when the level has
+	   no text (a picture bullet, or no level at all) - those stay CSS. */
+	numberingLabel(numId: string, level: number): string {
+		const levels = this.numberingLevels[numId];
+		const lvl = levels?.[level];
+		if (lvl?.levelText == null || lvl.bullet)
+			return null;
+
+		const counts = (this.numberingCounters[numId] ??= []);
+		counts[level] = (counts[level] ?? lvl.start - 1) + 1;
+		for (const key in levels) {
+			const below = levels[key];
+			// absent w:lvlRestart: restarts after any level above it; 0: never
+			if (below.level > level && level < (below.restart ?? below.level))
+				counts[below.level] = undefined;
+		}
+
+		return lvl.levelText.replace(/%(\d)/g, (s, n) => {
+			const ref = levels[parseInt(n, 10) - 1];
+			return ref ? this.formatNumber(counts[ref.level] ?? ref.start, ref.format) : "";
+		});
+	}
+
+	/* A count in a w:numFmt the way Word writes it - letters repeat past z
+	   (y, z, aa, bb); formats not covered here fall back to decimal. */
+	formatNumber(value: number, format: string): string {
+		switch (format) {
+			case "none":
+			case "bullet":
+				return "";
+
+			case "decimalZero":
+				return value >= 0 && value < 10 ? "0" + value : String(value);
+
+			case "lowerLetter":
+			case "upperLetter": {
+				if (value < 1) return String(value);
+				const letters = String.fromCharCode(97 + (value - 1) % 26).repeat(Math.floor((value - 1) / 26) + 1);
+				return format == "upperLetter" ? letters.toUpperCase() : letters;
+			}
+
+			case "lowerRoman":
+			case "upperRoman": {
+				if (value < 1 || value > 3999) return String(value);
+				const digits: [number, string][] = [[1000, "M"], [900, "CM"], [500, "D"], [400, "CD"], [100, "C"],
+					[90, "XC"], [50, "L"], [40, "XL"], [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"]];
+				let roman = "";
+				for (const [n, s] of digits)
+					while (value >= n) { roman += s; value -= n; }
+				return format == "lowerRoman" ? roman.toLowerCase() : roman;
+			}
+
+			default:
+				return String(value);
+		}
 	}
 
 	levelTextToContent(text: string, suff: string, id: string, numformat: string) {

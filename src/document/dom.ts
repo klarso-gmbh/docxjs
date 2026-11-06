@@ -164,6 +164,9 @@ export interface IDomNumbering {
     suff: string;
     format?: string;
     bullet?: NumberingPicBullet;
+    // w:lvlRestart: the level restarts after one of the first `restart`
+    // levels is used (0 = never); absent = after any level above it
+    restart?: number;
 }
 
 export interface NumberingPicBullet {

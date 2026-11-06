@@ -2,6 +2,8 @@ import { WordDocument } from './word-document';
 import { DocumentParser } from './document-parser';
 import { HtmlRenderer } from './html-renderer';
 import { positionAnchoredFrames, pinSheetHeights } from './measured-pagination';
+import { resolveTabStops, defaultTabPoints } from './tab-stops';
+import { addUpParagraphSpacing } from './paragraph-spacing';
 import { h } from './html';
 
 export interface Options {
@@ -30,7 +32,10 @@ export interface Options {
     // a page, and re-renders so pages split at Word-faithful boundaries. Also
     // applies Word's "auto" line metrics, justified space shrinking and (with
     // `hyphenate`) automatic hyphenation. Off by default: the render is then
-    // byte-identical to stock docx-preview.
+    // byte-identical to stock docx-preview. The lastRenderedPageBreak markers
+    // the document was saved with break pages as well only with
+    // `ignoreLastRenderedPageBreak: false`; otherwise they are removed first
+    // and the measurement alone decides, as Word re-paginates on open.
     measuredPagination: boolean;
     // Batch hyphenation callback used only under measuredPagination when the
     // document opts into automatic hyphenation. Receives the unique body words
@@ -54,6 +59,33 @@ export interface Options {
     // spaces may shrink to pull a word onto a line (Word 2013+ behavior).
     // Given as a positive fraction (e.g. 0.4 = up to 40%); defaults to 0.4.
     justificationShrink?: number;
+    // Under measuredPagination, give each paragraph that no line-spacing rule
+    // reaches (none in docDefaults, its style or itself - Word lays it out
+    // single) an explicit single line: the em ratio of its font's line
+    // metrics, probed large, times the font size. Otherwise the engine's
+    // "normal" applies, built from metrics rounded to whole pixels - 3% short
+    // per line for some fonts. Meant for pages that load their fonts with
+    // Word's line metrics (FontFace ascent/descent/lineGap overrides).
+    // Off by default.
+    explicitSingleLines?: boolean;
+    // Render each numbering label ("1", "(2)", "a)") as a real text span at
+    // the start of its paragraph, styled like the CSS ::before marker it
+    // replaces, and count it the way Word does: a level restarts the levels
+    // below it (w:lvlRestart aside), and each %N takes level N's own format.
+    // Generated content is not text, so a page that reads the text from the
+    // DOM (the Klarso PDF converter) needs this. Off by default.
+    numberingAsText?: boolean;
+    // Under measuredPagination, lay each tab out on its paragraph's tab stops
+    // (its style's and its own) the way Word does - left, right and centred
+    // stops, the default stops past the last one, leaders - instead of one em
+    // space (see tab-stops.ts). Off by default.
+    tabStops?: boolean;
+    // Under measuredPagination, in a document that turns HTML paragraph spacing
+    // off (w:doNotUseHTMLParagraphAutoSpacing), add a paragraph's space after to
+    // the next one's space before the way Word does, instead of letting the CSS
+    // margins collapse to the larger one (see paragraph-spacing.ts). Off by
+    // default.
+    addUpParagraphSpacing?: boolean;
     h: typeof h;
 }
 
@@ -82,6 +114,10 @@ export const defaultOptions: Options = {
     hyphenate: null,
     onMeasuredBreaks: null,
     justificationShrink: 0.4,
+    explicitSingleLines: false,
+    numberingAsText: false,
+    tabStops: false,
+    addUpParagraphSpacing: false,
     h: h
 };
 
@@ -114,6 +150,12 @@ export async function renderAsync(data: Blob | any, bodyContainer: HTMLElement, 
     // is only measurable once the pages are attached. (The even/odd padding swap
     // itself happens during render, in createPageElement.)
     if (userOptions?.measuredPagination) {
+        if (userOptions.addUpParagraphSpacing && doc.settingsPart?.settings?.doNotUseHTMLParagraphAutoSpacing)
+            addUpParagraphSpacing(bodyContainer);
+        // the tabs once more on the final pages: filled fields - a table of
+        // contents' page numbers - may have changed the text a stop aligns
+        if (userOptions.tabStops)
+            resolveTabStops(bodyContainer, defaultTabPoints(doc.settingsPart?.settings));
         positionAnchoredFrames(bodyContainer, doc.settingsPart?.settings);
         // last: the anchors are measured against the sheet as laid out
         pinSheetHeights(bodyContainer);
