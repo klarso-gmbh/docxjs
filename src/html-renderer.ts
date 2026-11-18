@@ -953,8 +953,14 @@ section.${c}>article { margin-bottom: auto; z-index: 1; }
    auto margin resolves to 0 as soon as the content plus that space exceeds the
    body band, and the sheet grows instead. Sheets would then differ in size. */
 section.${c}>article>*:last-child { margin-bottom: 0; }
-section.${c}>header { z-index: 0; }
-section.${c}>footer { z-index: 0; }
+/* A sheet held at the paper's height (measured pagination) whose body is too
+   tall shrinks its flex items. Header and footer have an explicit min-height
+   (their band), so they would shrink to it and the body would slide up over
+   the header. They keep their height; the body box takes the excess and its
+   content runs on into the bottom margin, as Word lets text do. */
+section.${c}>article { min-height: 0; }
+section.${c}>header { z-index: 0; flex-shrink: 0; }
+section.${c}>footer { z-index: 0; flex-shrink: 0; }
 .${c} table { border-collapse: collapse; }
 .${c} table td, .${c} table th { vertical-align: top; }
 .${c} td, .${c} th { padding: 0 5.4pt; }
