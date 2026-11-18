@@ -10,6 +10,9 @@ export interface WmlSettings {
 	evenAndOddHeaders: boolean;
 	mirrorMargins: boolean;
 	compatibilityMode: number;
+	// Word ADDS a paragraph's space after and the next one's space before, instead of
+	// taking the larger of the two (the HTML rule)
+	doNotUseHTMLParagraphAutoSpacing: boolean;
 }
 
 export interface NoteProperties {
@@ -28,11 +31,19 @@ export function parseSettings(elem: Element, xml: XmlParser) {
 			case "autoHyphenation": result.autoHyphenation = xml.boolAttr(el, "val", true); break;
 			case "evenAndOddHeaders": result.evenAndOddHeaders = xml.boolAttr(el, "val", true); break;
 			case "mirrorMargins": result.mirrorMargins = xml.boolAttr(el, "val", true); break;
-			case "compat": result.compatibilityMode = parseCompatibilityMode(el, xml); break;
+			case "compat":
+				result.compatibilityMode = parseCompatibilityMode(el, xml);
+				result.doNotUseHTMLParagraphAutoSpacing = parseCompatFlag(el, xml, "doNotUseHTMLParagraphAutoSpacing");
+				break;
 		}
 	}
 
     return result;
+}
+
+export function parseCompatFlag(elem: Element, xml: XmlParser, localName: string): boolean {
+	const flag = xml.element(elem, localName);
+	return !!flag && xml.boolAttr(flag, "val", true);
 }
 
 export function parseCompatibilityMode(elem: Element, xml: XmlParser): number {
