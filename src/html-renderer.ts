@@ -57,10 +57,13 @@ export class HtmlRenderer {
 	// the default paragraph style (w:default="1"), which formats every
 	// paragraph without a w:pStyle
 	defaultParagraphStyleId: string = null;
-	// numberingAsText: the levels of every w:num by level, and the running
-	// count of each (reset per render pass)
+	// the levels of every w:num by level; numberingAsText: the running count
+	// of each list, by w:abstractNum (reset per render pass)
 	numberingLevels: Record<string, Record<number, IDomNumbering>> = {};
 	numberingCounters: Record<string, number[]> = {};
+	// the "numId/level" pairs whose w:startOverride has restarted their list
+	// (reset per render pass, see numberingRestart)
+	numberingRestarts: Record<string, boolean> = {};
 	currentPart: Part = null;
 
 	tableVerticalMerges: CellVerticalMergeType[] = [];
@@ -385,6 +388,7 @@ export class HtmlRenderer {
 		const result = [];
 		// every render pass numbers the document from its start
 		this.numberingCounters = {};
+		this.numberingRestarts = {};
 
 		this.processElement(document);
 		const sections = this.splitBySection(document.children, document.props);
@@ -1046,7 +1050,14 @@ section.${c}>footer { z-index: 0; }
 
 	async renderNumbering(numberings: IDomNumbering[]) {
 		var styleText = "";
-		var resetCounters = [];
+		// every w:num of one w:abstractNum counts on the same list: one counter
+		// per list level, reset on the root to the level's start
+		var resetCounters: Record<string, string> = {};
+		// the counter-set of each paragraph rule: a level starts the level below
+		// it over. counter-set does not add up across rules, so the rule of a
+		// paragraph that restarts its list repeats it (see below)
+		var setCounters: Record<string, string[]> = {};
+		var restartLevels: IDomNumbering[] = [];
 
 		for (var num of numberings) {
 			var selector = `p.${this.numberingClass(num.id, num.level)}`;
@@ -1069,15 +1080,14 @@ section.${c}>footer { z-index: 0; }
 				}
 			}
 			else if (num.levelText) {
-				let counter = this.numberingCounter(num.id, num.level);
+				let counter = this.numberingCounter(num.abstractId, num.level);
 				const counterReset = counter + " " + (num.start - 1);
-				if (num.level > 0) {
-					styleText += this.styleToString(`p.${this.numberingClass(num.id, num.level - 1)}`, {
-						"counter-set": counterReset
-					});
-				}
+				if (num.level > 0)
+					(setCounters[`p.${this.numberingClass(num.id, num.level - 1)}`] ??= []).push(counterReset);
 				// reset all level counters with start value
-				resetCounters.push(counterReset);
+				resetCounters[counter] = counterReset;
+				if (num.startOverride != null)
+					restartLevels.push(num);
 
 				// the number's run style: the level's own rPr wins, but fall
 				// back to the linked paragraph style's run properties so the
@@ -1091,7 +1101,7 @@ section.${c}>footer { z-index: 0; }
 					numRunStyle = { ...linkedRun, ...num.rStyle };
 
 				var beforeValues: Record<string, string> = {
-					"content": this.levelTextToContent(num.levelText, num.suff, num.id, this.numFormatToCssValue(num.format)),
+					"content": this.levelTextToContent(num.levelText, num.suff, num.abstractId, this.numFormatToCssValue(num.format)),
 					"counter-increment": counter,
 					...numRunStyle,
 				};
@@ -1153,9 +1163,23 @@ section.${c}>footer { z-index: 0; }
 				styleText += this.styleToString(`${selector}.${this.numberingDirectClass()}`, num.pStyle);
 		}
 
-		if (resetCounters.length > 0) {
+		// the paragraph that restarts its list (see numberingRestart) sets its
+		// level to the start override - and starts the level below over, too
+		for (const num of restartLevels) {
+			const selector = `p.${this.numberingClass(num.id, num.level)}`;
+			setCounters[`${selector}.${this.numberingRestartClass()}`] = [
+				this.numberingCounter(num.abstractId, num.level) + " " + (num.startOverride - 1),
+				...(setCounters[selector] ?? [])
+			];
+		}
+
+		for (const selector in setCounters)
+			styleText += this.styleToString(selector, { "counter-set": setCounters[selector].join(" ") });
+
+		const counterResets = Object.values(resetCounters);
+		if (counterResets.length > 0) {
 			styleText += this.styleToString(this.rootSelector, {
-				"counter-reset": resetCounters.join(" ")
+				"counter-reset": counterResets.join(" ")
 			});
 		}
 
@@ -1453,9 +1477,13 @@ section.${c}>footer { z-index: 0; }
 			if (numbering === elem.numbering)
 				result.classList.add(this.numberingDirectClass());
 
+			const restart = this.numberingRestart(numbering.id, numbering.level);
+			if (restart)
+				result.classList.add(this.numberingRestartClass());
+
 			// numberingAsText: the label as the paragraph's first span, styled
 			// by the marker rule renderNumbering writes for it
-			const label = this.options.numberingAsText ? this.numberingLabel(numbering.id, numbering.level) : null;
+			const label = this.options.numberingAsText ? this.numberingLabel(numbering.id, numbering.level, restart) : null;
 			if (label != null) {
 				const span = this.h({ tagName: "span", children: [label] }) as HTMLElement;
 				span.setAttribute("data-docx-num-label", "");
@@ -2100,6 +2128,11 @@ section.${c}>footer { z-index: 0; }
 		return `${this.className}-num-direct`;
 	}
 
+	// the paragraph that restarts its list (see numberingRestart)
+	numberingRestartClass() {
+		return `${this.className}-num-restart`;
+	}
+
 	// the marker box of a "tab" suffix spans the hanging indent; levels
 	// declaring hanging="0" parse to "-0.00pt" - only a real (negative)
 	// hanging indent replaces the default tab stop
@@ -2133,22 +2166,38 @@ section.${c}>footer { z-index: 0; }
 		return result + "}\r\n";
 	}
 
-	numberingCounter(id: string, lvl: number) {
-		return `${this.className}-num-${id}-${lvl}`;
+	// the CSS counter of a list level - of a w:abstractNum, shared by its w:num
+	numberingCounter(abstractId: string, lvl: number) {
+		return `${this.className}-list-${abstractId}-${lvl}`;
+	}
+
+	/* Whether this paragraph restarts its list: the first one a w:num numbers
+	   at a level whose start that w:num overrides (w:startOverride). Word
+	   restarts the list there once; later paragraphs count on. */
+	numberingRestart(numId: string, level: number): boolean {
+		const key = `${numId}/${level}`;
+		if (this.numberingLevels[numId]?.[level]?.startOverride == null || this.numberingRestarts[key])
+			return false;
+
+		return this.numberingRestarts[key] = true;
 	}
 
 	/* The label of the next paragraph at this level, counted the way Word
-	   counts: the level goes up by one, every level below it starts over
-	   (unless its w:lvlRestart says otherwise), and each %N in the level text
-	   shows level N's count in level N's own format. Null when the level has
-	   no text (a picture bullet, or no level at all) - those stay CSS. */
-	numberingLabel(numId: string, level: number): string {
+	   counts: every w:num of one w:abstractNum counts on the same list, the
+	   level goes up by one (or starts at the w:num's start override where the
+	   paragraph restarts the list), every level below it starts over (unless
+	   its w:lvlRestart says otherwise), and each %N in the level text shows
+	   level N's count in level N's own format. Null when the level has no
+	   text (a picture bullet, or no level at all) - those stay CSS. */
+	numberingLabel(numId: string, level: number, restart: boolean): string {
 		const levels = this.numberingLevels[numId];
 		const lvl = levels?.[level];
 		if (lvl?.levelText == null || lvl.bullet)
 			return null;
 
-		const counts = (this.numberingCounters[numId] ??= []);
+		const counts = (this.numberingCounters[lvl.abstractId] ??= []);
+		if (restart)
+			counts[level] = lvl.startOverride - 1;
 		counts[level] = (counts[level] ?? lvl.start - 1) + 1;
 		for (const key in levels) {
 			const below = levels[key];
@@ -2197,7 +2246,7 @@ section.${c}>footer { z-index: 0; }
 		}
 	}
 
-	levelTextToContent(text: string, suff: string, id: string, numformat: string) {
+	levelTextToContent(text: string, suff: string, abstractId: string, numformat: string) {
 		const suffMap = {
 			"tab": "\\9",
 			"space": "\\a0",
@@ -2205,7 +2254,7 @@ section.${c}>footer { z-index: 0; }
 
 		var result = text.replace(/%\d*/g, s => {
 			let lvl = parseInt(s.substring(1), 10) - 1;
-			return `"counter(${this.numberingCounter(id, lvl)}, ${numformat})"`;
+			return `"counter(${this.numberingCounter(abstractId, lvl)}, ${numformat})"`;
 		});
 
 		return `"${result}${suffMap[suff] ?? ""}"`;

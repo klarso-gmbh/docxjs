@@ -483,12 +483,33 @@ export class DocumentParser {
 					nums.push({
 						numId: xml.attr(n, "numId"),
 						abstractNumId: xml.elementAttr(n, "abstractNumId", "val"),
+						startOverrides: this.parseStartOverrides(n),
 					});
 					break;
 			}
 		}
 
-		return nums.flatMap(x => levels.filter(lvl => x.abstractNumId == lvl.id).map(lvl => ({ ...lvl, id: x.numId })));
+		// a w:num numbers with the levels of its w:abstractNum, from the start
+		// it overrides for a level
+		return nums.flatMap(x => levels.filter(lvl => x.abstractNumId == lvl.id).map(lvl => ({
+			...lvl,
+			id: x.numId,
+			abstractId: x.abstractNumId,
+			startOverride: x.startOverrides[lvl.level],
+		})));
+	}
+
+	// the w:lvlOverride/w:startOverride of a w:num, by level
+	parseStartOverrides(num: Element): Record<number, number> {
+		const result: Record<number, number> = {};
+
+		for (const override of xml.elements(num, "lvlOverride")) {
+			const start = xml.element(override, "startOverride");
+			if (start)
+				result[xml.intAttr(override, "ilvl")] = xml.intAttr(start, "val");
+		}
+
+		return result;
 	}
 
 	parseNumberingPicBullet(elem: Element): NumberingPicBullet {

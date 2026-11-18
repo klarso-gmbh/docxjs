@@ -167,6 +167,12 @@ export interface IDomNumbering {
     // w:lvlRestart: the level restarts after one of the first `restart`
     // levels is used (0 = never); absent = after any level above it
     restart?: number;
+    // the w:abstractNum of the level's w:num: every w:num of one w:abstractNum
+    // continues the same list
+    abstractId?: string;
+    // w:lvlOverride/w:startOverride of the level's w:num: the list restarts at
+    // this value at the first paragraph that w:num numbers at this level
+    startOverride?: number;
 }
 
 export interface NumberingPicBullet {
