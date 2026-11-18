@@ -9,8 +9,8 @@ describe("numbered lists", function () {
 	const REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
 	// "name 4" pairs of a computed counter-reset/-increment/-set
 	const COUNTER = /([A-Za-z_][\w-]*)\s+(-?\d+)/g;
-	// the strings and counter() of a computed content value
-	const CONTENT_PART = /"((?:[^"\\]|\\.)*)"|counter\(([\w-]+)[^)]*\)/g;
+	// the strings and counter(name[, style]) of a computed content value
+	const CONTENT_PART = /"((?:[^"\\]|\\.)*)"|counter\(([\w-]+)(?:,\s*([\w-]+))?\)/g;
 
 	// Klarso's Word export of a heading with a fixed number: the headings are
 	// numbered by their styles (w:num 1), the fixed one by its own w:num 5000 on
@@ -60,6 +60,41 @@ describe("numbered lists", function () {
 		].join("")
 	};
 
+	// the paragraph styles of the list below, each linked to its level
+	const lettersStyles = `
+		<w:style w:type="paragraph" w:styleId="Kapitel"><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+		<w:style w:type="paragraph" w:styleId="Absatz"><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>
+		<w:style w:type="paragraph" w:styleId="Unterabsatz"><w:pPr><w:numPr><w:ilvl w:val="2"/><w:numId w:val="1"/></w:numPr></w:pPr></w:style>`;
+
+	// a list with chapter headings on level 0 and lettered paragraphs a), b)
+	// on level 2 - no level-1 paragraph in between. Word starts a level over
+	// after ANY level above it, not only the one right above: every chapter's
+	// letters start at a). Word shows 1, a), b), 2, a).
+	const lettersUnderHeadings = {
+		numbering: lettersNumbering(""),
+		styles: lettersStyles,
+		body: [
+			paragraph("Kapitel A", { style: "Kapitel" }),
+			paragraph("Unterabsatz A.a", { style: "Unterabsatz" }),
+			paragraph("Unterabsatz A.b", { style: "Unterabsatz" }),
+			paragraph("Kapitel B", { style: "Kapitel" }),
+			paragraph("Unterabsatz B.a", { style: "Unterabsatz" })
+		].join("")
+	};
+
+	// the same list with w:lvlRestart 0 on the letters: they never start over.
+	// Word shows 1, a), 2, b).
+	const lettersThatNeverRestart = {
+		numbering: lettersNumbering(`<w:lvlRestart w:val="0"/>`),
+		styles: lettersStyles,
+		body: [
+			paragraph("Kapitel A", { style: "Kapitel" }),
+			paragraph("Unterabsatz A.a", { style: "Unterabsatz" }),
+			paragraph("Kapitel B", { style: "Kapitel" }),
+			paragraph("Unterabsatz B.b", { style: "Unterabsatz" })
+		].join("")
+	};
+
 	let container = null;
 
 	afterEach(() => container?.remove());
@@ -87,6 +122,42 @@ describe("numbered lists", function () {
 
 		expect(textLabels(container)).toEqual(["1.", "2.", "1.", "2.", "3."]);
 	});
+
+	it("start a level over after any level above it (CSS counters)", async () => {
+		container = await render(lettersUnderHeadings);
+
+		expect(cssCounterLabels(container)).toEqual(["1", "a)", "b)", "2", "a)"]);
+	});
+
+	it("start a level over after any level above it (numberingAsText)", async () => {
+		container = await render(lettersUnderHeadings, { numberingAsText: true });
+
+		expect(textLabels(container)).toEqual(["1", "a)", "b)", "2", "a)"]);
+	});
+
+	it("never start a level over whose w:lvlRestart is 0 (CSS counters)", async () => {
+		container = await render(lettersThatNeverRestart);
+
+		expect(cssCounterLabels(container)).toEqual(["1", "a)", "2", "b)"]);
+	});
+
+	it("never start a level over whose w:lvlRestart is 0 (numberingAsText)", async () => {
+		container = await render(lettersThatNeverRestart, { numberingAsText: true });
+
+		expect(textLabels(container)).toEqual(["1", "a)", "2", "b)"]);
+	});
+
+	// headings (level 0), a numbered paragraph (1) and the letters (2), each
+	// level linked to its paragraph style; `letterProps` goes into level 2
+	function lettersNumbering(letterProps) {
+		return `
+			<w:abstractNum w:abstractNumId="0">
+				<w:lvl w:ilvl="0"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Kapitel"/><w:lvlText w:val="%1"/></w:lvl>
+				<w:lvl w:ilvl="1"><w:start w:val="1"/><w:numFmt w:val="decimal"/><w:pStyle w:val="Absatz"/><w:lvlText w:val="(%2)"/></w:lvl>
+				<w:lvl w:ilvl="2"><w:start w:val="1"/><w:numFmt w:val="lowerLetter"/>${letterProps}<w:pStyle w:val="Unterabsatz"/><w:lvlText w:val="%3)"/></w:lvl>
+			</w:abstractNum>
+			<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>`;
+	}
 
 	// a paragraph with a style and/or numbering of its own
 	function paragraph(text, { style, numId, ilvl } = {}) {
@@ -131,7 +202,7 @@ describe("numbered lists", function () {
 	/* CSS counters: the ::before content of each numbered paragraph, with the
 	   counters counted as the browser counts them, in tree order: on every
 	   element counter-reset, then counter-increment, then counter-set, and the
-	   same on its ::before. Decimal counters only. */
+	   same on its ::before. Decimal and alphabetic counters only. */
 	function cssCounterLabels(container) {
 		const counters = {};
 		const count = (style) => {
@@ -150,9 +221,20 @@ describe("numbered lists", function () {
 			count(before);
 			if (before.content.includes("counter("))
 				labels.push(Array.from(before.content.matchAll(CONTENT_PART),
-					([, text, counter]) => counter ? counters[counter] : unescapeCss(text)).join("").trim());
+					([, text, counter, style]) => counter ? counterText(counters[counter], style) : unescapeCss(text)).join("").trim());
 		}
 		return labels;
+	}
+
+	// a counter's value in its counter style: lower-/upper-alpha count a..z,
+	// aa, ab (CSS alphabetic); anything else is shown as decimal
+	function counterText(value, style) {
+		if (style != "lower-alpha" && style != "upper-alpha")
+			return String(value);
+		let letters = "";
+		for (let n = value; n > 0; n = Math.floor((n - 1) / 26))
+			letters = String.fromCharCode(97 + (n - 1) % 26) + letters;
+		return style == "upper-alpha" ? letters.toUpperCase() : letters;
 	}
 
 	function unescapeCss(text) {

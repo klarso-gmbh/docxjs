@@ -1062,9 +1062,10 @@ section.${c}>footer { z-index: 0; flex-shrink: 0; }
 		// every w:num of one w:abstractNum counts on the same list: one counter
 		// per list level, reset on the root to the level's start
 		var resetCounters: Record<string, string> = {};
-		// the counter-set of each paragraph rule: a level starts the level below
-		// it over. counter-set does not add up across rules, so the rule of a
-		// paragraph that restarts its list repeats it (see below)
+		// the counter-set of each paragraph rule: a level starts every level
+		// below it over, as numberingLabel counts. counter-set does not add up
+		// across rules, so the rule of a paragraph that restarts its list
+		// repeats it (see below)
 		var setCounters: Record<string, string[]> = {};
 		var restartLevels: IDomNumbering[] = [];
 
@@ -1091,8 +1092,11 @@ section.${c}>footer { z-index: 0; flex-shrink: 0; }
 			else if (num.levelText) {
 				let counter = this.numberingCounter(num.abstractId, num.level);
 				const counterReset = counter + " " + (num.start - 1);
-				if (num.level > 0)
-					(setCounters[`p.${this.numberingClass(num.id, num.level - 1)}`] ??= []).push(counterReset);
+				// Word starts a level over after any level above it, not only the
+				// one right above - with w:lvlRestart after one of its first
+				// `restart` levels only (0: never)
+				for (let above = 0; above < num.level && above < (num.restart ?? num.level); above++)
+					(setCounters[`p.${this.numberingClass(num.id, above)}`] ??= []).push(counterReset);
 				// reset all level counters with start value
 				resetCounters[counter] = counterReset;
 				if (num.startOverride != null)
@@ -1173,7 +1177,7 @@ section.${c}>footer { z-index: 0; flex-shrink: 0; }
 		}
 
 		// the paragraph that restarts its list (see numberingRestart) sets its
-		// level to the start override - and starts the level below over, too
+		// level to the start override - and starts the levels below over, too
 		for (const num of restartLevels) {
 			const selector = `p.${this.numberingClass(num.id, num.level)}`;
 			setCounters[`${selector}.${this.numberingRestartClass()}`] = [
