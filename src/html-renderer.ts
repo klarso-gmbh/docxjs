@@ -1751,6 +1751,12 @@ section.${c}>footer { z-index: 0; flex-shrink: 0; }
 
 		const result = this.toHTML(elem, ns.html, "span", children);
 
+		// a run's border goes around everything the run holds, but an inline box
+		// is only as tall as its line of text: a bordered run holding a picture
+		// is an inline-block, whose box - and border - grows with the picture
+		if (elem.cssStyle?.["border"] && elem.children?.some(c => c.type == DomType.Drawing))
+			result.style.display = "inline-block";
+
 		if (elem.id)
 			result.id = elem.id;
 
