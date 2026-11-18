@@ -27,7 +27,7 @@ import { WmlCommentRangeStart, WmlCommentReference } from './comments/elements';
 import { cx, h, ns } from './html';
 import {
 	assignModelIndices, applyMeasuredGeometry, findMeasuredBreaks, applyBreaksToModel,
-	resolveBreaksToDocument, hyphenateModel, getAutoLineMul, removeSavedPageBreaks
+	resolveBreaksToDocument, hyphenateModel, getAutoLineMul, removeSavedPageBreaks, hasSavedPageBreaks
 } from './measured-pagination';
 import { tabStopsAttr, resolveTabStops, defaultTabPoints } from './tab-stops';
 import { addUpParagraphSpacing, PREV_AFTER_RESET } from './paragraph-spacing';
@@ -471,6 +471,9 @@ export class HtmlRenderer {
 		const markersRemoved = this.options.ignoreLastRenderedPageBreak;
 		if (markersRemoved)
 			removeSavedPageBreaks(body);
+		// pages Word laid out are kept within a tolerance (see needsPagination);
+		// without saved breaks every page comes from the measurement and is exact
+		const exactPages = markersRemoved || !hasSavedPageBreaks(body);
 		this.options.ignoreLastRenderedPageBreak = false;
 		this.savedBreaksRemoved = markersRemoved;
 
@@ -515,7 +518,7 @@ export class HtmlRenderer {
 			if (this.options.addUpParagraphSpacing && settings?.doNotUseHTMLParagraphAutoSpacing)
 				addUpParagraphSpacing(host);
 
-			const breaks = findMeasuredBreaks(host, markersRemoved);
+			const breaks = findMeasuredBreaks(host, exactPages);
 			// expose the breaks addressed against the original document BEFORE
 			// applyBreaksToModel mutates the paragraphs (offsets still line up)
 			if (this.options.onMeasuredBreaks) {

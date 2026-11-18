@@ -110,6 +110,15 @@ export function removeSavedPageBreaks(body: DocumentElement): number {
 	return removed;
 }
 
+/* Whether Word laid the document out and saved its page breaks
+   (w:lastRenderedPageBreak) - a document a program wrote has none. */
+export function hasSavedPageBreaks(body: DocumentElement): boolean {
+	const walk = (el: OpenXmlElement): boolean =>
+		(el.type == DomType.Break && (el as WmlBreak).break == "lastRenderedPageBreak")
+		|| (el.children ?? []).some(walk);
+	return walk(body);
+}
+
 // ===========================================================================
 // 2. Geometry - Word line metrics + justified shrink, measured once per font.
 // ===========================================================================
@@ -851,10 +860,11 @@ function paginateSheet(section: HTMLElement, geo: { target: number; padBottom: n
 }
 
 /* A sheet the document's own saved page breaks delimit is left alone while it
-   overflows by less than a tolerance. Once those breaks are removed, every
-   sheet comes from the measurement alone, so any overflow is a page Word turns
-   too: left alone, the sheet keeps the content, and the fixed-height page
-   squeezes its header and footer over the body. */
+   overflows by less than a tolerance. Once those breaks are removed - or when
+   the document never had any, being written by a program and not by Word -
+   every sheet comes from the measurement alone, so any overflow is a page Word
+   turns too: left alone, the sheet keeps the content and runs over its bottom
+   margin. */
 function needsPagination(section: HTMLElement, geo: { target: number }, exact: boolean): boolean {
 	const tolerance = exact ? EPS : Math.max(24, geo.target * 0.05);
 	return section.getBoundingClientRect().height > geo.target + tolerance;
